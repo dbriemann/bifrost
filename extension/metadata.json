@@ -1,0 +1,7 @@
+{
+  "uuid": "bifrost@dlb.local",
+  "name": "Bifrost Window Bridge",
+  "description": "Window discovery and activation for the Odin/raylib Bifrost picker.",
+  "shell-version": ["50"],
+  "version": 1
+}
