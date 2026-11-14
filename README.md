@@ -85,7 +85,9 @@ counts.
 - **Arrows / Enter:** navigate and select. **PageUp/PageDown:** overflow pages.
 - **Esc:** return from windows to applications; at the root, dismiss. During a
   drag, cancel the drag. Cancelling restores prior focus if the picker still owns it.
-- **Click:** select. **Drag an application tile onto another:** change saved order.
+- **Click:** select. **Drag an application tile onto another or into a gap:**
+  change saved order. A floating icon follows the pointer and an insertion marker
+  shows the drop position. Normal hover highlighting pauses while dragging.
 - A second invocation or `bifrost hide` closes the visible picker. In this version,
   a second invocation with different filters also closes it; invoke again to open
   the new selection.
@@ -116,7 +118,8 @@ Demo selection displays the selected title instead of activating a real window.
 
 ## Verification and current limits
 
-Implemented checks: six Odin model tests for grouping, persistence round-trip,
+Implemented checks: twelve Odin model/interaction tests for drag gestures, drop
+targets, cancellation, grouping, persistence round-trip,
 compaction, filters, ordering, and key alphabet; eight mocked-compositor tests of
 the actual extension class; native icon lookup/SVG-to-RGBA and atomic state-write
 checks; compilation and command-line validation.

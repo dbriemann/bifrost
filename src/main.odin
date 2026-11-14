@@ -214,9 +214,9 @@ run_picker :: proc(options: Options, snapshot: Snapshot, order: ^Order, path: st
         defer delete(response)
         if !ok { fail(response) }
     }
-    child, page, highlighted, drag := -1, 0, 0, -1
-    drag_origin: rl.Vector2
-    dragging, armed, done, activated, had_focus := false, true, false, false, false
+    child, page, highlighted := -1, 0, 0
+    gesture := Pointer_Gesture{}
+    armed, done, activated, had_focus := true, false, false, false
     status := ""
     frame := 0
     for !done && !rl.WindowShouldClose() {
@@ -230,27 +230,27 @@ run_picker :: proc(options: Options, snapshot: Snapshot, order: ^Order, path: st
         if child >= 0 { count = len(groups[child].windows) }
         pages := max(1, (count + capacity - 1) / capacity)
         visible := min(capacity, max(0, count - page*capacity))
-        hovered := -1
         mouse := rl.GetMousePosition()
-        for i in 0..<visible {
-            x := f32(24 + (i % cols)*148)
-            y := f32(88 + (i / cols)*156)
-            if rl.CheckCollisionPointRec(mouse, {x, y, 136, 144}) { hovered = page*capacity+i }
-        }
-        if rl.IsMouseButtonPressed(.LEFT) {
-            drag = hovered; drag_origin = mouse; dragging = false
-        }
-        if drag >= 0 && child < 0 && rl.IsMouseButtonDown(.LEFT) {
-            dx, dy := mouse.x-drag_origin.x, mouse.y-drag_origin.y
-            if dx*dx + dy*dy > 64 { dragging = true }
-        }
+        pressed := rl.IsMouseButtonPressed(.LEFT)
+        down := rl.IsMouseButtonDown(.LEFT)
+        released := rl.IsMouseButtonReleased(.LEFT)
+        // Treat release-frame motion as a drag before resolving the drop target.
+        dropping := gesture.active && child < 0 &&
+            (gesture.dragging ||
+             (mouse.x-gesture.origin_x)*(mouse.x-gesture.origin_x) +
+             (mouse.y-gesture.origin_y)*(mouse.y-gesture.origin_y) >= 64)
+        hovered := pointer_target(mouse.x, mouse.y, cols, capacity, count, page, dropping, gesture.source)
+        escape := rl.IsKeyPressed(.ESCAPE)
+        pointer_was_active := gesture.active
+        pointer_action := pointer_step(&gesture, mouse.x, mouse.y, hovered,
+            pressed, down, released, child < 0, escape)
         choose := -1
-        if rl.IsKeyPressed(.ESCAPE) {
-            if drag >= 0 { drag = -1; dragging = false }
+        if escape {
+            if pointer_was_active { /* Cancelling the drag keeps the picker open. */ }
             else if child >= 0 { child = -1; page = 0; highlighted = 0; status = "" }
             else { done = true }
         }
-        if drag < 0 {
+        if !gesture.active && !escape && pointer_action.kind == .None {
             if rl.IsKeyPressed(.PAGE_DOWN) { page = (page + 1) % pages; highlighted = page*capacity }
             if rl.IsKeyPressed(.PAGE_UP) { page = (page + pages - 1) % pages; highlighted = page*capacity }
             if count > 0 {
@@ -280,14 +280,18 @@ run_picker :: proc(options: Options, snapshot: Snapshot, order: ^Order, path: st
                 cp = rl.GetCharPressed()
             }
         }
-        if rl.IsMouseButtonReleased(.LEFT) && drag >= 0 {
-            if dragging && hovered >= 0 && hovered != drag && child < 0 {
-                reorder(order, groups[:], drag, hovered)
-                free_groups(&groups)
-                groups = build_groups(order^, snapshot, options.filter)
-                if !options.demo && !save_order(order^, path) { status = "Could not save order; changes last until exit" }
-            } else if !dragging && hovered == drag { choose = hovered }
-            drag = -1; dragging = false
+        switch pointer_action.kind {
+        case .Reorder:
+            reorder(order, groups[:], pointer_action.source, pointer_action.target)
+            free_groups(&groups)
+            groups = build_groups(order^, snapshot, options.filter)
+            highlighted = pointer_action.target
+            if options.demo { status = "Preview order changed (not saved)" }
+            else if save_order(order^, path) { status = "Application order saved" }
+            else { status = "Could not save order; changes last until exit" }
+        case .Select:
+            choose = pointer_action.target
+        case .None:
         }
         if choose >= 0 && choose < count && !done {
             group := &groups[choose] if child < 0 else &groups[child]
@@ -327,10 +331,10 @@ run_picker :: proc(options: Options, snapshot: Snapshot, order: ^Order, path: st
             y := f32(88 + (local/cols)*156)
             tile := rl.Rectangle{x, y, 136, 144}
             hot := rl.CheckCollisionPointRec(mouse, tile)
-            if hot { highlighted = index }
+            if hot && !gesture.active { highlighted = index }
             fill := rl.Color{29, 35, 49, 255}
-            if highlighted == index { fill = {43, 57, 78, 255} }
-            if dragging && hot { fill = {47, 84, 100, 255} }
+            if highlighted == index && !gesture.dragging { fill = {43, 57, 78, 255} }
+            if gesture.dragging && index == gesture.source { fill = {24, 29, 41, 255} }
             rl.DrawRectangleRounded(tile, 0.15, 8, fill)
             stack := min(3, len(group.windows)) if child < 0 else 1
             texture := icons[group.app]
@@ -356,9 +360,31 @@ run_picker :: proc(options: Options, snapshot: Snapshot, order: ^Order, path: st
             text(font, title, x+9, y+108, 15, {232, 237, 248, 255}, 118)
             if child >= 0 { text(font, group.name, x+9, y+127, 11, {139, 151, 173, 255}, 118) }
         }
+        if gesture.dragging && child < 0 {
+            if hovered >= 0 && hovered != gesture.source {
+                local := hovered-page*capacity
+                x := f32(24 + (local%cols)*148)
+                y := f32(88 + (local/cols)*156)
+                if gesture.source < hovered { x += 138 } else { x -= 6 }
+                rl.DrawRectangle(c.int(x), c.int(y), 4, 144, {157, 218, 244, 255})
+            }
+            source := groups[gesture.source]
+            gx := min(mouse.x+14, f32(width-142))
+            gy := min(mouse.y+14, f32(height-126))
+            rl.DrawRectangleRounded({gx, gy, 132, 112}, 0.15, 8, {48, 62, 84, 245})
+            texture := icons[source.app]
+            if texture.id != 0 {
+                rl.DrawTexturePro(texture, {0, 0, f32(texture.width), f32(texture.height)},
+                    {gx+34, gy+9, 64, 64}, {}, 0, {255, 255, 255, 235})
+            } else {
+                text(font, "APP", gx+46, gy+28, 20, {239, 242, 249, 255})
+            }
+            text(font, source.name, gx+9, gy+85, 14, {239, 242, 249, 255}, 114)
+        }
         if count == 0 { text(font, "No matching windows", 30, 112, 22, {139, 151, 173, 255}) }
         footer := "Type a key to switch · Drag to reorder · Esc to cancel"
         if status != "" { footer = status }
+        if gesture.dragging && child < 0 { footer = "Release to save position · Esc to cancel drag" }
         text(font, footer, 28, f32(height-35), 13, {139, 170, 192, 255}, f32(width-50))
         if pages > 1 { text(font, fmt.tprintf("Page %d/%d · PgUp/PgDn", page+1, pages), 28, f32(height-57), 12, {139, 151, 173, 255}) }
         rl.EndDrawing()
