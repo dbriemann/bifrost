@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include <gio/gio.h>
+#include <gio/gdesktopappinfo.h>
 #include <dlfcn.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -17,6 +18,24 @@ extern void __real_glfwDefaultWindowHints(void);
 void __wrap_glfwDefaultWindowHints(void) {
     __real_glfwDefaultWindowHints();
     glfwWindowHintString(0x00026001, "org.bifrost.Picker");
+}
+// Raylib's desktop backend queries positions during monitor detection and
+// tries to center the new window. Wayland has no client-side global position
+// API; use its documented zero-position fallback without making those calls.
+// Actual placement is owned by the GNOME bridge. Other backends still delegate.
+extern void __real_glfwGetWindowPos(void *, int *, int *);
+extern void __real_glfwSetWindowPos(void *, int, int);
+void __wrap_glfwGetWindowPos(void *window, int *x, int *y) {
+    if (glfwGetPlatform() == 0x00060003) {
+        if (x) *x = 0;
+        if (y) *y = 0;
+        return;
+    }
+    __real_glfwGetWindowPos(window, x, y);
+}
+void __wrap_glfwSetWindowPos(void *window, int x, int y) {
+    if (glfwGetPlatform() != 0x00060003)
+        __real_glfwSetWindowPos(window, x, y);
 }
 static GDBusConnection *bus;
 static char *last_error;
@@ -104,41 +123,103 @@ int bf_wayland_prepare(void) {
 }
 int bf_wayland_active(void) { return glfwGetPlatform() == 0x00060003; }
 
-// GTK is only a headless icon-theme resolver; the picker is rendered by raylib.
-// Runtime loading avoids a GTK development dependency and initializing its display.
+// GTK lookup runs in a separate process: GLFW/libdecor can load GTK3 while
+// the resolver uses GTK4. Loading both in this process breaks GtkIconTheme.
+static GSubprocess *icon_resolver;
+static GDataInputStream *icon_output;
+static GOutputStream *icon_input;
+static void icon_resolver_shutdown(void) {
+    if (icon_input) g_output_stream_close(icon_input, NULL, NULL);
+    g_clear_object(&icon_output);
+    icon_input = NULL; // Borrowed from the subprocess.
+    if (icon_resolver) {
+        g_subprocess_wait(icon_resolver, NULL, NULL);
+        g_clear_object(&icon_resolver);
+    }
+}
 char *bf_icon(const char *description) {
     if (!description || !*description) return NULL;
-    static void *gtk;
-    static void *(*theme_new)(void);
-    static void (*theme_set_name)(void *, const char *);
-    static void *(*lookup)(void *, GIcon *, int, int, int, int);
-    static GFile *(*get_file)(void *);
-    static void *theme;
-    if (!gtk) {
-        gtk = dlopen("libgtk-4.so.1", RTLD_LAZY | RTLD_LOCAL);
-        if (!gtk) return NULL;
-        *(void **)(&theme_new) = dlsym(gtk, "gtk_icon_theme_new");
-        *(void **)(&theme_set_name) = dlsym(gtk, "gtk_icon_theme_set_theme_name");
-        *(void **)(&lookup) = dlsym(gtk, "gtk_icon_theme_lookup_by_gicon");
-        *(void **)(&get_file) = dlsym(gtk, "gtk_icon_paintable_get_file");
-        if (!theme_new || !lookup || !get_file || !theme_set_name) return NULL;
-        theme = theme_new();
-        GSettings *settings = g_settings_new("org.gnome.desktop.interface");
-        char *name = g_settings_get_string(settings, "icon-theme");
-        theme_set_name(theme, name); g_free(name); g_object_unref(settings);
+    GError *error = NULL;
+    if (!icon_resolver) {
+        char *helper = NULL;
+        const char *override = g_getenv("BIFROST_ICON_RESOLVER");
+        if (override && *override) helper = g_strdup(override);
+        else {
+            char *executable = g_file_read_link("/proc/self/exe", &error);
+            if (!executable) { error_set(error->message); g_error_free(error); return NULL; }
+            char *directory = g_path_get_dirname(executable);
+            helper = g_build_filename(directory, "bifrost-icon-resolver", NULL);
+            g_free(directory); g_free(executable);
+        }
+        icon_resolver = g_subprocess_new(G_SUBPROCESS_FLAGS_STDIN_PIPE |
+            G_SUBPROCESS_FLAGS_STDOUT_PIPE, &error, helper, NULL);
+        g_free(helper);
+        if (!icon_resolver) { error_set(error->message); g_error_free(error); return NULL; }
+        icon_input = g_subprocess_get_stdin_pipe(icon_resolver);
+        icon_output = g_data_input_stream_new(g_subprocess_get_stdout_pipe(icon_resolver));
     }
-    if (!theme) return NULL;
-    GIcon *icon = g_icon_new_for_string(description, NULL);
-    if (!icon) return NULL;
-    GFile *file = NULL;
-    void *paintable = NULL;
-    if (G_IS_FILE_ICON(icon)) file = g_file_icon_get_file(G_FILE_ICON(icon));
-    else { paintable = lookup(theme, icon, 128, 1, 0, 0); if (paintable) file = get_file(paintable); }
-    char *path = file ? g_file_get_path(file) : NULL;
-    if (paintable) g_object_unref(paintable);
-    g_object_unref(icon);
+    char *encoded = g_base64_encode((const guchar *)description, strlen(description));
+    char *request = g_strconcat(encoded, "\n", NULL);
+    g_free(encoded);
+    gboolean written = g_output_stream_write_all(icon_input, request, strlen(request),
+        NULL, NULL, &error);
+    g_free(request);
+    if (written) written = g_output_stream_flush(icon_input, NULL, &error);
+    char *line = written ? g_data_input_stream_read_line(icon_output, NULL, NULL, &error) : NULL;
+    if (!line) {
+        error_set(error ? error->message : "Icon resolver exited unexpectedly");
+        g_clear_error(&error);
+        icon_resolver_shutdown();
+        return NULL;
+    }
+    if (!*line) { g_free(line); return NULL; }
+    gsize length;
+    guchar *decoded = g_base64_decode(line, &length);
+    char *path = g_strndup((const char *)decoded, length);
+    g_free(decoded); g_free(line);
     return path;
 }
+// Resolve from the bridge first, then the desktop entry (including Flatpak
+// exports), then the app ID as an icon name. Do not substitute image-missing:
+// callers must be able to continue to the next application-specific candidate.
+char *bf_app_icon(const char *description, const char *app_id) {
+    error_set("");
+    char *path = bf_icon(description);
+    if (path) return path;
+    if (!app_id || !*app_id) return NULL;
+    char *desktop_id = g_str_has_suffix(app_id, ".desktop") ?
+        g_strdup(app_id) : g_strconcat(app_id, ".desktop", NULL);
+    GDesktopAppInfo *info = g_desktop_app_info_new(desktop_id);
+    if (!info && !strchr(desktop_id, '/')) {
+        char *user_exports = g_build_filename(g_get_home_dir(), ".local", "share",
+            "flatpak", "exports", "share", "applications", desktop_id, NULL);
+        info = g_desktop_app_info_new_from_filename(user_exports);
+        g_free(user_exports);
+        if (!info) {
+            char *system_exports = g_build_filename("/var/lib/flatpak/exports/share/applications",
+                desktop_id, NULL);
+            info = g_desktop_app_info_new_from_filename(system_exports);
+            g_free(system_exports);
+        }
+    }
+    if (info) {
+        GIcon *icon = g_app_info_get_icon(G_APP_INFO(info));
+        if (icon) {
+            char *serialized = g_icon_to_string(icon);
+            path = bf_icon(serialized);
+            g_free(serialized);
+        }
+        g_object_unref(info);
+    }
+    if (!path) {
+        char *name = g_strndup(desktop_id, strlen(desktop_id) - strlen(".desktop"));
+        path = bf_icon(name);
+        g_free(name);
+    }
+    g_free(desktop_id);
+    return path;
+}
+
 // Rasterize SVG in-process. New GdkPixbuf installations may route SVG decoding
 // through an external sandbox service; librsvg gives us deterministic RGBA here.
 static unsigned char *svg_pixels(const char *path, int *width, int *height) {
@@ -170,32 +251,32 @@ static unsigned char *svg_pixels(const char *path, int *width, int *height) {
     GError *error = NULL;
     void *handle = handle_new(path, &error);
     if (!handle) { if (error) { error_set(error->message); g_error_free(error); } return NULL; }
-    void *surface = surface_new(0, 128, 128); // CAIRO_FORMAT_ARGB32
+    void *surface = surface_new(0, 256, 256); // CAIRO_FORMAT_ARGB32
     void *context = context_new(surface);
-    const double viewport[4] = {0, 0, 128, 128};
+    const double viewport[4] = {0, 0, 256, 256};
     unsigned char *rgba = NULL;
     if (!surface_status(surface) && render(handle, context, viewport, &error)) {
         surface_flush(surface);
         unsigned char *data = surface_data(surface);
         int stride = surface_stride(surface);
-        rgba = g_malloc(128 * 128 * 4);
-        for (int y = 0; y < 128; ++y) for (int x = 0; x < 128; ++x) {
+        rgba = g_malloc(256 * 256 * 4);
+        for (int y = 0; y < 256; ++y) for (int x = 0; x < 256; ++x) {
             guint32 pixel; memcpy(&pixel, data + y * stride + x * 4, 4);
             guint alpha = pixel >> 24;
-            unsigned char *out = rgba + (y * 128 + x) * 4;
+            unsigned char *out = rgba + (y * 256 + x) * 4;
             out[0] = alpha ? MIN(255u, (((pixel >> 16) & 255) * 255 + alpha/2) / alpha) : 0;
             out[1] = alpha ? MIN(255u, (((pixel >> 8) & 255) * 255 + alpha/2) / alpha) : 0;
             out[2] = alpha ? MIN(255u, ((pixel & 255) * 255 + alpha/2) / alpha) : 0;
             out[3] = alpha;
         }
-        *width = *height = 128;
+        *width = *height = 256;
     }
     if (error) { error_set(error->message); g_error_free(error); }
     context_destroy(context); surface_destroy(surface); g_object_unref(handle);
     return rgba;
 }
 
-// Decode themed SVG/PNG via GdkPixbuf so raylib can upload plain RGBA pixels.
+// Rasterize SVG, with GdkPixbuf as fallback for formats not handled by raylib.
 unsigned char *bf_pixels(const char *path, int *width, int *height) {
     if (g_str_has_suffix(path, ".svg") || g_str_has_suffix(path, ".svgz"))
         return svg_pixels(path, width, height);
@@ -240,6 +321,7 @@ int bf_save(const char *path, const char *json) {
     return ok;
 }
 void bf_shutdown(void) {
+    icon_resolver_shutdown();
     if (bus && runtime_registration) g_dbus_connection_unregister_object(bus, runtime_registration);
     if (bus && owner) {
         GVariant *reply = g_dbus_connection_call_sync(bus, "org.freedesktop.DBus",

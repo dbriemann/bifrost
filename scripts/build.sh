@@ -29,7 +29,9 @@ s = s[:a] + '''foreign import lib {
 ''' + s[b:]
 pathlib.Path('build/rl/raylib.odin').write_text(s)
 PY
-cc -std=c11 -fPIC -O2 -Wall -Wextra -Werror -c native/platform.c -o build/platform.o $(pkg-config --cflags gio-2.0)
+cc -std=c11 -O2 -Wall -Wextra -Werror native/icon-resolver.c \
+  $(pkg-config --cflags --libs gio-2.0) -ldl -o build/bifrost-icon-resolver
+cc -std=c11 -fPIC -O2 -Wall -Wextra -Werror -c native/platform.c -o build/platform.o $(pkg-config --cflags gio-unix-2.0)
 ar rcs build/libplatform.a build/platform.o
-"$ODIN_BIN" build src -out:build/bifrost -debug -extra-linker-flags:"$(pkg-config --libs gio-2.0) -Wl,--wrap=glfwDefaultWindowHints"
+"$ODIN_BIN" build src -out:build/bifrost -debug -extra-linker-flags:"$(pkg-config --libs gio-2.0) -Wl,--wrap=glfwDefaultWindowHints,--wrap=glfwGetWindowPos,--wrap=glfwSetWindowPos"
 printf 'Built %s/build/bifrost\n' "$PWD"

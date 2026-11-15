@@ -5,6 +5,15 @@ in **Odin**, drawn with **raylib**. A small GNOME Shell extension supplies windo
 metadata, activation, and picker placement. Other compositors and macOS are
 planned; this first version implements the GNOME path.
 
+The picker uses a larger layout with 120-pixel icons, enlarged fonts and key
+badges, and centered application names/window titles below each icon. Names
+use 45-pixel text with up to two lines, and selection keys use bold 51-pixel text.
+The heading shows `BIFROST (all windows)` or the active filter mode. Tile and row
+heights follow the text: single-line names leave only a small bottom padding,
+while longer names reserve a second line when needed. The grid
+fits within the monitor's work area, using fewer columns or overflow pages as
+needed; very small work areas reduce the overall scale to stay usable.
+
 Bifrost groups running windows by application. Groups with several windows show
 stacked icons and a count. Select a group to choose one of its windows; a group
 with one window switches directly. Application order persists, closed apps are
@@ -22,8 +31,13 @@ Requirements for the initial **Linux x86-64** build:
   link libraries. X11 is a link dependency of the supplied raylib archive;
   Bifrost explicitly selects and verifies Wayland at runtime.
 - GNOME's GTK4, GdkPixbuf, librsvg, Cairo, and icon themes at runtime. GTK is used
-  only to resolve icon files; all UI rendering is raylib. Missing/undecodable icons
-  fall back to an application tile.
+  only to resolve icon files in a separate `bifrost-icon-resolver` process, so it
+  cannot conflict with the GTK version used by GLFW/libdecor. All UI rendering
+  is raylib. The picker uses the
+  application's icon supplied by GNOME, with desktop-entry and Flatpak-export
+  fallbacks. PNG and other common raster formats decode directly in raylib;
+  SVG icons rasterize in-process through librsvg. Missing icons are reported on
+  stderr and fall back to an application tile.
 - Node.js to run the bridge logic tests.
 
 Typical Fedora development packages (Odin is installed separately):
@@ -39,8 +53,9 @@ The build copies Odin's matching raylib archive into `build/`, removes its bundl
 X11-only GLFW object, and links the system GLFW instead. It generates a local
 copy of the matching Odin binding with the replacement link paths. It never
 changes the Odin installation. `GLFW_LIBRARY`, `RAYLIB_DIR`, and `ODIN_BIN` may
-be set to override discovery. A small linker wrapper preserves our Wayland app
-ID when raylib resets window hints. The binary remains linked to `libglfw.so.3`.
+be set to override discovery. Small linker wrappers preserve our Wayland app
+ID when raylib resets window hints and bypass unsupported client-side window
+position calls on Wayland. The GNOME bridge handles actual placement. The binary remains linked to `libglfw.so.3`.
 
 ## Install and run
 
@@ -52,7 +67,9 @@ gnome-extensions enable bifrost@dlb.local
 ~/.local/bin/bifrost toggle
 ```
 
-Installation copies the binary and extension into your user directories. It does
+Installation copies the picker, its icon resolver helper, and the extension
+into your user directories. Keep `bifrost-icon-resolver` beside the `bifrost`
+executable if copying the application manually. It does
 not enable the extension or change keyboard shortcuts automatically. After editing
 an already loaded extension on Wayland, log out/in to reload its JavaScript.
 `make package` also creates an extension ZIP in `dist/`.
@@ -102,6 +119,7 @@ Order is saved atomically in `$XDG_STATE_HOME/bifrost/order.json`, defaulting to
 Delete that file to reset the order. Reordering a filtered subset preserves the
 positions of excluded apps in the saved ordering. `BIFROST_FONT` can point to a
 TTF font with the glyphs you need; the default attempts Noto Sans and DejaVu Sans.
+`BIFROST_BOLD_FONT` can override the bold font used for selection keys and counts.
 The raylib UI does not yet expose a screen-reader accessibility tree.
 
 ## Preview without the extension
@@ -118,11 +136,14 @@ Demo selection displays the selected title instead of activating a real window.
 
 ## Verification and current limits
 
-Implemented checks: twelve Odin model/interaction tests for drag gestures, drop
+Implemented checks: fourteen Odin model/font/image/interaction tests for drag gestures, drop
 targets, cancellation, grouping, persistence round-trip,
 compaction, filters, ordering, and key alphabet; eight mocked-compositor tests of
 the actual extension class; native icon lookup/SVG-to-RGBA and atomic state-write
-checks; compilation and command-line validation.
+checks, isolated icon lookup with GTK3 preloaded, desktop-entry icon fallbacks,
+missing-icon rejection, PNG/SVG pixel
+checks, font glyph coverage, and Wayland position-call routing; compilation and
+command-line validation.
 
 **Live GNOME focus, window placement, fullscreen behavior, and rendering have not
 been validated in the development sandbox**, which blocks session D-Bus/Wayland
@@ -148,4 +169,5 @@ prototype issues, see [PLAN.md](PLAN.md).
 
 To remove, disable the extension, delete
 `~/.local/share/gnome-shell/extensions/bifrost@dlb.local`, and remove
-`~/.local/bin/bifrost`. Saved ordering can be removed separately.
+`~/.local/bin/bifrost` and `~/.local/bin/bifrost-icon-resolver`. Saved ordering
+can be removed separately.

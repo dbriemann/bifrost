@@ -12,6 +12,7 @@ foreign platform {
     bf_wayland_prepare :: proc() -> c.int ---
     bf_wayland_active :: proc() -> c.int ---
     bf_icon :: proc(description: cstring) -> cstring ---
+    bf_app_icon :: proc(description, app_id: cstring) -> cstring ---
     bf_pixels :: proc(path: cstring, width, height: ^c.int) -> rawptr ---
     bf_save :: proc(path, text: cstring) -> c.int ---
     bf_shutdown :: proc() ---

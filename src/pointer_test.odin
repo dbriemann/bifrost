@@ -64,26 +64,26 @@ cancelled_and_outside_drops_never_select :: proc(t: ^testing.T) {
 
 @(test)
 drop_targets_include_gaps_and_trailing_row_space :: proc(t: ^testing.T) {
-    // The first tile ends at x=160; the next begins at x=172.
-    testing.expect_value(t, pointer_target(166, 130, 3, 9, 5, 0, false), -1)
-    testing.expect_value(t, pointer_target(166, 130, 3, 9, 5, 0, true), 0)
-    testing.expect_value(t, pointer_target(315, 130, 3, 9, 5, 0, true), 1)
+    // The first tile ends at x=228; the next begins at x=244.
+    testing.expect_value(t, pointer_target(236, 130, 3, 9, 5, 0, false), -1)
+    testing.expect_value(t, pointer_target(236, 130, 3, 9, 5, 0, true), 0)
+    testing.expect_value(t, pointer_target(456, 130, 3, 9, 5, 0, true), 1)
     // The last row contains two tiles; empty trailing cell means append.
-    testing.expect_value(t, pointer_target(350, 290, 3, 9, 5, 0, false), -1)
-    testing.expect_value(t, pointer_target(350, 290, 3, 9, 5, 0, true), 4)
+    testing.expect_value(t, pointer_target(510, 294, 3, 9, 5, 0, false, tile_height=154, cell_height=166), -1)
+    testing.expect_value(t, pointer_target(510, 294, 3, 9, 5, 0, true, tile_height=154, cell_height=166), 4)
     testing.expect_value(t, pointer_target(60, 130, 3, 9, 20, 1, true), 9)
     testing.expect_value(t, pointer_target(10, 130, 3, 9, 5, 0, true), -1)
-    testing.expect_value(t, pointer_target(60, 450, 3, 9, 5, 0, true), -1)
+    testing.expect_value(t, pointer_target(60, 594, 3, 9, 5, 0, true), -1)
 }
 
 @(test)
 gaps_insert_between_neighbors_in_both_directions :: proc(t: ^testing.T) {
     // Move tile 2 to the gap after tile 0: final index 1.
-    testing.expect_value(t, pointer_target(166, 130, 3, 9, 5, 0, true, 2), 1)
+    testing.expect_value(t, pointer_target(236, 130, 3, 9, 5, 0, true, 2), 1)
     // Tile 0 is already before tile 1: dropping in that gap leaves it there.
-    testing.expect_value(t, pointer_target(166, 130, 3, 9, 5, 0, true, 0), 0)
+    testing.expect_value(t, pointer_target(236, 130, 3, 9, 5, 0, true, 0), 0)
     // Move tile 0 after tile 1 using the following gap.
-    testing.expect_value(t, pointer_target(315, 130, 3, 9, 5, 0, true, 0), 1)
+    testing.expect_value(t, pointer_target(456, 130, 3, 9, 5, 0, true, 0), 1)
     // The gap below the first row is the insertion boundary before tile 3.
-    testing.expect_value(t, pointer_target(60, 238, 3, 9, 5, 0, true, 4), 3)
+    testing.expect_value(t, pointer_target(60, 310, 3, 9, 5, 0, true, 4), 3)
 }
