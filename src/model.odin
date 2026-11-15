@@ -4,6 +4,12 @@ import "core:strings"
 
 KEYS :: "1234567890abcdefghijklmnopqrstuvwxyz"
 
+cycle_selection :: proc(selected, count: int, reverse: bool) -> int {
+    if count <= 0 { return 0 }
+    step := -1 if reverse else 1
+    return (clamp(selected, 0, count-1)+step+count)%count
+}
+
 Window :: struct {
     id, app, name, title, icon: string,
     workspace, monitor: int,

@@ -3,5 +3,5 @@
   "name": "Bifrost Window Bridge",
   "description": "Window discovery, activation, and application launching for the Odin/raylib Bifrost picker.",
   "shell-version": ["50"],
-  "version": 3
+  "version": 6
 }

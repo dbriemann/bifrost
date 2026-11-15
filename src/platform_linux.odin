@@ -11,6 +11,7 @@ foreign platform {
     bf_poll :: proc() -> cstring ---
     bf_wayland_prepare :: proc() -> c.int ---
     bf_wayland_active :: proc() -> c.int ---
+    bf_window_size_limits :: proc(width, height: c.int) ---
     bf_icon :: proc(description: cstring) -> cstring ---
     bf_app_icon :: proc(description, app_id: cstring) -> cstring ---
     bf_pixels :: proc(path: cstring, width, height: ^c.int) -> rawptr ---

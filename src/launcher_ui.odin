@@ -17,10 +17,33 @@ launcher_visible_rows :: proc(height: c.int) -> int {
     return max(1, min(LAUNCHER_LIMIT, (int(height)-210)/LAUNCHER_ROW_HEIGHT))
 }
 
+// A click must begin and end on the same result. Reuse the tile gesture rules
+// so dragging, clicking padding, or releasing over another row cannot launch.
+launcher_pointer_step :: proc(state: ^Launcher, x, y: f32, width, height: c.int,
+    pressed, down, released, pointer_moved: bool) -> int {
+    target := -1
+    if x >= 28 && x < f32(width-28) && y >= LAUNCHER_LIST_Y {
+        offset := int(y-LAUNCHER_LIST_Y)
+        row := offset/LAUNCHER_ROW_HEIGHT
+        index := state.top+row
+        if row < launcher_visible_rows(height) && index < len(state.results) &&
+            offset%LAUNCHER_ROW_HEIGHT < LAUNCHER_ROW_HEIGHT-2 {
+            target = index
+        }
+    }
+    if target >= 0 && (pointer_moved || pressed) { state.selected = target }
+    action := pointer_step(&state.pointer, x, y, target, pressed, down, released, false, false)
+    if action.kind == .Select {
+        state.selected = action.target
+        return state.results[action.target].index
+    }
+    return -1
+}
+
 launcher_input :: proc(state: ^Launcher, width, height: c.int, entering: bool,
-    previous_mouse: ^rl.Vector2) -> (back: bool, launch_index: int) {
+    mouse: rl.Vector2, previous_mouse: ^rl.Vector2) -> (back: bool, launch_index: int) {
     launch_index = -1
-    if rl.IsKeyPressed(.ESCAPE) { return true, -1 }
+    if rl.IsKeyPressed(.ESCAPE) { state.pointer = {}; return true, -1 }
     changed := false
     control := rl.IsKeyDown(.LEFT_CONTROL) || rl.IsKeyDown(.RIGHT_CONTROL)
     if key_edit(.BACKSPACE) { changed = launcher_backspace(state) }
@@ -53,6 +76,11 @@ launcher_input :: proc(state: ^Launcher, width, height: c.int, entering: bool,
     moved := false
     if key_edit(.DOWN) { state.selected = min(len(state.results)-1, state.selected+1); moved = true }
     if key_edit(.UP) { state.selected = max(0, state.selected-1); moved = true }
+    if key_edit(.TAB) {
+        reverse := rl.IsKeyDown(.LEFT_SHIFT) || rl.IsKeyDown(.RIGHT_SHIFT)
+        state.selected = cycle_selection(state.selected, len(state.results), reverse)
+        moved = true
+    }
     state.selected = max(0, state.selected)
     if moved || changed {
         if state.selected < state.top { state.top = state.selected }
@@ -63,16 +91,11 @@ launcher_input :: proc(state: ^Launcher, width, height: c.int, entering: bool,
     if wheel != 0 && len(state.results) > 0 {
         state.selected = clamp(state.selected, state.top, min(len(state.results)-1, state.top+rows-1))
     }
-    mouse := rl.GetMousePosition()
     pointer_moved := mouse != previous_mouse^
     previous_mouse^ = mouse
-    if mouse.x >= 28 && mouse.x < f32(width-28) && mouse.y >= LAUNCHER_LIST_Y {
-        row := int(mouse.y-LAUNCHER_LIST_Y)/LAUNCHER_ROW_HEIGHT
-        index := state.top+row
-        if row < rows && index < len(state.results) && (pointer_moved || rl.IsMouseButtonPressed(.LEFT)) {
-            state.selected = index
-        }
-    }
+    clicked := launcher_pointer_step(state, mouse.x, mouse.y, width, height,
+        rl.IsMouseButtonPressed(.LEFT), rl.IsMouseButtonDown(.LEFT), rl.IsMouseButtonReleased(.LEFT), pointer_moved)
+    if clicked >= 0 { return false, clicked }
     if rl.IsKeyPressed(.ENTER) && len(state.results) > 0 {
         return false, state.results[state.selected].index
     }
@@ -128,7 +151,7 @@ launcher_draw :: proc(state: Launcher, font: rl.Font, width, height: c.int, icon
     if len(state.results) == 0 && state.error == "" {
         text(font, "No matching applications", 42, LAUNCHER_LIST_Y+12, 22, {139, 151, 173, 255}, available)
     }
-    footer := "Type to search · Up/Down to select · Enter to start · Esc to return"
+    footer := "Tab / Shift+Tab or arrows · Enter/click to start · Esc to return"
     if state.error != "" { footer = state.error }
     text(font, footer, 28, f32(height-35), 13, {139, 170, 192, 255}, f32(width-56))
     text(font, fmt.tprintf("%d results", len(state.results)), 28, f32(height-55), 12,

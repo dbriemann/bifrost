@@ -13,11 +13,12 @@ Options :: struct {
     command: string,
     filter: Filter,
     demo: bool,
+    backdrop: bool,
     frames: int,
     screenshot: string,
 }
 Reply :: struct { ok: bool, error: string }
-Request :: struct { token, id: string }
+Request :: struct { token, id: string, backdrop: bool }
 
 Startup_Profile :: struct { enabled: bool, start, last: time.Tick }
 startup_profile: Startup_Profile
@@ -44,14 +45,15 @@ bridge :: proc(method: string, request: Request) -> (string, bool) {
     return strings.clone(string(raw)), true
 }
 
-parse_options :: proc() -> Options {
-    options := Options{command = "toggle", filter = {-1, -1, ""}}
-    args := os.args[1:]
+parse_options :: proc(args: []string) -> Options {
+    options := Options{command = "toggle", filter = {-1, -1, ""}, backdrop=true}
     for i := 0; i < len(args); i += 1 {
         a := args[i]
         switch a {
         case "toggle", "hide", "doctor", "list": options.command = a
         case "--demo": options.demo = true
+        case "--backdrop": options.backdrop = true
+        case "--no-backdrop": options.backdrop = false
         case "--workspace", "--monitor", "--app", "--frames", "--screenshot":
             if i+1 >= len(args) { fail(fmt.tprintf("%s needs a value", a)) }
             i += 1
@@ -80,11 +82,13 @@ Usage: bifrost [toggle|hide|doctor|list] [options]
   --workspace all|current|INDEX   Include windows on this workspace (zero-based)
   --monitor all|current|INDEX     Include windows on this monitor (zero-based)
   --app DESKTOP_ID                Include one application
+  --no-backdrop                   Disable desktop dimming and blur (enabled by default)
+  --backdrop                      Enable desktop dimming and blur
   --demo                         UI preview without the GNOME extension
   --frames N --screenshot FILE    Bounded demo rendering / PNG capture
-Keys: 1–9, 0, a–z select; arrows navigate; Enter selects; Esc goes back/cancels.
+Keys: 1–9, 0, a–z select; arrows or Tab/Shift+Tab navigate; Enter selects; Esc goes back/cancels.
 PageUp/PageDown change overflow pages. Drag application tiles to save their order.
-Space opens installed-app search; type to filter, Up/Down to select, Enter to start.
+Space opens installed-app search; type to filter, Up/Down or Tab/Shift+Tab to select, Enter/click to start.
 A second invocation closes the visible picker. Configuration: $XDG_STATE_HOME/bifrost/order.json`)
             os.exit(0)
         case: fail(fmt.tprintf("unknown argument: %s (see --help)", a))
@@ -263,6 +267,19 @@ view_tile_height :: proc(font: rl.Font, groups: []Group, snapshot: Snapshot, chi
     return 154 + (lines-1)*34 + (34 if child >= 0 else 0)
 }
 
+view_grid_layout :: proc(font: rl.Font, groups: []Group, snapshot: Snapshot,
+    child, page, available_width, available_height: int) -> Grid_Layout {
+    count := len(groups) if child < 0 else len(groups[child].windows)
+    return grid_layout(count, view_tile_height(font, groups, snapshot, child),
+        available_width, available_height, page)
+}
+
+size_picker :: proc(width, height: c.int, scale: f32) {
+    pixel_width, pixel_height := c.int(f32(width)*scale), c.int(f32(height)*scale)
+    bf_window_size_limits(pixel_width, pixel_height)
+    rl.SetWindowSize(pixel_width, pixel_height)
+}
+
 selection_held :: proc() -> bool {
     for key := 48; key <= 90; key += 1 { if rl.IsKeyDown(rl.KeyboardKey(key)) { return true } }
     for key := 320; key <= 329; key += 1 { if rl.IsKeyDown(rl.KeyboardKey(key)) { return true } }
@@ -276,19 +293,15 @@ run_picker :: proc(options: Options, snapshot: Snapshot, order: ^Order, path: st
     startup_mark("Wayland connection")
     // Draw and hit-test in the same logical grid, then enlarge the entire UI.
     // Reduce the scale only when even a single tile would exceed the work area.
-    ui_scale := min(f32(1.5), f32(snapshot.width-16)/f32(CELL_WIDTH+48), f32(snapshot.height-16)/f32(CELL_HEIGHT+142))
-    available_width := int(f32(snapshot.width)/ui_scale)
-    available_height := int(f32(snapshot.height)/ui_scale)
-    cols := max(1, min(6, (available_width - 56) / CELL_WIDTH))
-    largest_view := len(groups)
-    for group in groups { largest_view = max(largest_view, len(group.windows)) }
-    rows := max(1, min(6, (available_height - 170) / CELL_HEIGHT, (largest_view+cols-1)/cols))
-    capacity := min(len(KEYS), cols * rows)
-    width := c.int(cols * CELL_WIDTH + 48)
-    // Keep geometry identical between root/child views and counts.
-    height := c.int(rows * CELL_HEIGHT + 142)
+    ui_scale := min(f32(1.5), f32(snapshot.width-16)/f32(CELL_WIDTH+48),
+        f32(snapshot.height-16)/f32(GRID_Y+222+grid_footer_height(1, true)))
+    available_width := int(f32(snapshot.width-16)/ui_scale)
+    available_height := int(f32(snapshot.height-16)/ui_scale)
+    grid := grid_layout(len(groups), 188, available_width, available_height)
+    cols, capacity := grid.cols, grid.capacity
+    width, height := c.int(grid.width), c.int(grid.height)
     rl.SetTraceLogLevel(.WARNING)
-    rl.SetConfigFlags({.WINDOW_UNDECORATED, .WINDOW_HIGHDPI, .VSYNC_HINT})
+    rl.SetConfigFlags({.WINDOW_UNDECORATED, .WINDOW_HIGHDPI, .WINDOW_RESIZABLE, .VSYNC_HINT})
     rl.InitWindow(c.int(f32(width)*ui_scale), c.int(f32(height)*ui_scale), cstr(fmt.tprintf("Bifrost · %s", snapshot.token)))
     if !rl.IsWindowReady() { fail("raylib could not create its Wayland window") }
     defer rl.CloseWindow()
@@ -296,30 +309,20 @@ run_picker :: proc(options: Options, snapshot: Snapshot, order: ^Order, path: st
     startup_mark("window and OpenGL")
     rl.SetExitKey(.KEY_NULL)
     rl.SetTargetFPS(60)
-    rl.SetMouseScale(1/ui_scale, 1/ui_scale)
     camera := rl.Camera2D{zoom = ui_scale}
     font := load_font(snapshot)
     defer if font.texture.id != rl.GetFontDefault().texture.id { rl.UnloadFont(font) }
     key_font := load_font(snapshot, bold=true)
     defer if key_font.texture.id != rl.GetFontDefault().texture.id { rl.UnloadFont(key_font) }
     startup_mark("fonts")
-    // Fit the window to the compact view heights, keeping its size stable when
-    // opening a group or returning to applications.
-    grid_height := 0
-    for view := -1; view < len(groups); view += 1 {
-        if view >= 0 && len(groups[view].windows) <= 1 { continue }
-        items := len(groups) if view < 0 else len(groups[view].windows)
-        step := view_tile_height(font, groups[:], snapshot, view) + 12
-        view_rows := max(1, min(6, (available_height-170)/step, (items+cols-1)/cols))
-        grid_height = max(grid_height, view_rows*step)
-    }
-    height = c.int(grid_height+142)
-    rl.SetWindowSize(c.int(f32(width)*ui_scale), c.int(f32(height)*ui_scale))
+    grid = view_grid_layout(font, groups[:], snapshot, -1, 0, available_width, available_height)
+    cols, capacity = grid.cols, grid.capacity
+    width, height = c.int(grid.width), c.int(grid.height)
+    size_picker(width, height, ui_scale)
     icons := make(map[string]rl.Texture2D)
     for group in groups { icons[group.app] = load_icon(group.icon, group.app) }
     defer { for _, texture in icons { if texture.id != 0 { rl.UnloadTexture(texture) } }; delete(icons) }
     startup_mark("icons")
-    grid_width, grid_window_height := width, height
     launcher := Launcher{}
     defer delete(launcher.query)
     defer delete(launcher.results)
@@ -335,7 +338,8 @@ run_picker :: proc(options: Options, snapshot: Snapshot, order: ^Order, path: st
     launcher_active, catalogue_loaded := false, false
     launcher_font := rl.Font{}
     defer if launcher_font.texture.id != 0 && launcher_font.texture.id != rl.GetFontDefault().texture.id { rl.UnloadFont(launcher_font) }
-    launcher_mouse := rl.GetMousePosition()
+    launcher_mouse := ui_mouse_position(camera)
+    picker_mouse := launcher_mouse
     // Submit the complete picker before asking Shell to present it. A separate
     // blank frame here used to add a swap/frame wait to every invocation.
     needs_present := !options.demo
@@ -350,10 +354,12 @@ run_picker :: proc(options: Options, snapshot: Snapshot, order: ^Order, path: st
         focused := rl.IsWindowFocused()
         if focused { had_focus = true }
         if had_focus && !focused && !options.demo { break }
+        // One coordinate sample drives hover, clicks, drag targets, and drawing.
+        mouse := ui_mouse_position(camera)
         entering_launcher := !launcher_active && !gesture.active && rl.IsKeyPressed(.SPACE)
         if entering_launcher {
             launcher_active = true
-            launcher_mouse = rl.GetMousePosition()
+            launcher_mouse = mouse
             gesture = {}
             if !catalogue_loaded {
                 if options.demo {
@@ -383,17 +389,16 @@ run_picker :: proc(options: Options, snapshot: Snapshot, order: ^Order, path: st
                 }
             }
             if catalogue_loaded { launcher_refresh(&launcher) }
-            width = max(grid_width, c.int(min(700, available_width-16)))
+            width = max(width, c.int(min(700, available_width-16)))
             height = c.int(min(760, available_height-12))
-            rl.SetWindowSize(c.int(f32(width)*ui_scale), c.int(f32(height)*ui_scale))
+            size_picker(width, height, ui_scale)
             needs_present = !options.demo
         }
         if launcher_active {
-            back, app_index := launcher_input(&launcher, width, height, entering_launcher, &launcher_mouse)
+            back, app_index := launcher_input(&launcher, width, height, entering_launcher, mouse, &launcher_mouse)
             if back {
                 launcher_active = false
-                width, height = grid_width, grid_window_height
-                rl.SetWindowSize(c.int(f32(width)*ui_scale), c.int(f32(height)*ui_scale))
+                picker_mouse = mouse
                 needs_present = !options.demo
             } else if app_index >= 0 {
                 app := launcher.apps[app_index]
@@ -420,12 +425,12 @@ run_picker :: proc(options: Options, snapshot: Snapshot, order: ^Order, path: st
             if !armed && !selection_held() { armed = true }
             count := len(groups)
             if child >= 0 { count = len(groups[child].windows) }
-            tile_height := view_tile_height(font, groups[:], snapshot, child)
-            cell_height := tile_height+12
-            capacity = min(len(KEYS), cols*max(1, (int(height)-142)/cell_height))
-            pages := max(1, (count + capacity - 1) / capacity)
-            visible := min(capacity, max(0, count - page*capacity))
-            mouse := rl.GetMousePosition()
+            grid = view_grid_layout(font, groups[:], snapshot, child, page, available_width, available_height)
+            cols, capacity, page = grid.cols, grid.capacity, grid.page
+            tile_height, cell_height := grid.tile_height, grid.cell_height
+            pages, visible := grid.pages, grid.visible
+            pointer_moved := mouse != picker_mouse
+            picker_mouse = mouse
             pressed := rl.IsMouseButtonPressed(.LEFT)
             down := rl.IsMouseButtonDown(.LEFT)
             released := rl.IsMouseButtonReleased(.LEFT)
@@ -435,6 +440,9 @@ run_picker :: proc(options: Options, snapshot: Snapshot, order: ^Order, path: st
                  (mouse.x-gesture.origin_x)*(mouse.x-gesture.origin_x) +
                  (mouse.y-gesture.origin_y)*(mouse.y-gesture.origin_y) >= 64)
             hovered := pointer_target(mouse.x, mouse.y, cols, capacity, count, page, dropping, gesture.source, tile_height=tile_height, cell_height=cell_height)
+            if hovered >= 0 && !gesture.active && !dropping && (pointer_moved || pressed) {
+                highlighted = hovered
+            }
             escape := rl.IsKeyPressed(.ESCAPE)
             pointer_was_active := gesture.active
             pointer_action := pointer_step(&gesture, mouse.x, mouse.y, hovered,
@@ -453,6 +461,10 @@ run_picker :: proc(options: Options, snapshot: Snapshot, order: ^Order, path: st
                     if rl.IsKeyPressed(.LEFT) { highlighted = max(0, highlighted-1) }
                     if rl.IsKeyPressed(.DOWN) { highlighted = min(count-1, highlighted+cols) }
                     if rl.IsKeyPressed(.UP) { highlighted = max(0, highlighted-cols) }
+                    if key_edit(.TAB) {
+                        reverse := rl.IsKeyDown(.LEFT_SHIFT) || rl.IsKeyDown(.RIGHT_SHIFT)
+                        highlighted = cycle_selection(highlighted, count, reverse)
+                    }
                     page = highlighted / capacity
                     if rl.IsKeyPressed(.ENTER) && armed { choose = highlighted }
                 }
@@ -496,7 +508,7 @@ run_picker :: proc(options: Options, snapshot: Snapshot, order: ^Order, path: st
                     index := group.windows[0] if child < 0 else group.windows[choose]
                     if options.demo { status = fmt.aprintf("Preview: %s", snapshot.windows[index].title) }
                     else {
-                        response, ok := bridge("Activate", {snapshot.token, snapshot.windows[index].id})
+                        response, ok := bridge("Activate", {token=snapshot.token, id=snapshot.windows[index].id})
                         reply: Reply
                         if ok && json.unmarshal_string(response, &reply) == nil && reply.ok { done = true; activated = true }
                         else if !ok { status = response }
@@ -506,6 +518,16 @@ run_picker :: proc(options: Options, snapshot: Snapshot, order: ^Order, path: st
                 }
             }
         } // Picker input is inactive while the launcher owns the keyboard.
+        if !launcher_active {
+            // A group/page transition changes the content size immediately.
+            grid = view_grid_layout(font, groups[:], snapshot, child, page, available_width, available_height)
+            cols, capacity, page = grid.cols, grid.capacity, grid.page
+            if width != c.int(grid.width) || height != c.int(grid.height) {
+                width, height = c.int(grid.width), c.int(grid.height)
+                size_picker(width, height, ui_scale)
+                needs_present = !options.demo
+            }
+        }
         rl.BeginDrawing()
         rl.ClearBackground({19, 23, 34, 255})
         rl.BeginMode2D(camera)
@@ -529,15 +551,10 @@ run_picker :: proc(options: Options, snapshot: Snapshot, order: ^Order, path: st
             search_font := launcher_font if launcher_font.texture.id != 0 else font
             launcher_draw(launcher, search_font, width, height, icons)
         } else {
-            // Recompute after a view transition in this frame.
-            tile_height := view_tile_height(font, groups[:], snapshot, child)
-            cell_height := tile_height+12
-            capacity = min(len(KEYS), cols*max(1, (int(height)-142)/cell_height))
+            tile_height, cell_height := grid.tile_height, grid.cell_height
             count := len(groups)
             if child >= 0 { count = len(groups[child].windows) }
-            visible := min(capacity, max(0, count-page*capacity))
-            pages := max(1, (count+capacity-1)/capacity)
-            mouse := rl.GetMousePosition()
+            visible, pages := grid.visible, grid.pages
             hovered := pointer_target(mouse.x, mouse.y, cols, capacity, count, page,
                 gesture.dragging, gesture.source, tile_height=tile_height, cell_height=cell_height)
             for local in 0..<visible {
@@ -546,8 +563,6 @@ run_picker :: proc(options: Options, snapshot: Snapshot, order: ^Order, path: st
                 x := f32(GRID_X + (local%cols)*CELL_WIDTH)
                 y := f32(GRID_Y + (local/cols)*cell_height)
                 tile := rl.Rectangle{x, y, TILE_WIDTH, f32(tile_height)}
-                hot := rl.CheckCollisionPointRec(mouse, tile)
-                if hot && !gesture.active { highlighted = index }
                 fill := rl.Color{29, 35, 49, 255}
                 if highlighted == index && !gesture.dragging { fill = {43, 57, 78, 255} }
                 if gesture.dragging && index == gesture.source { fill = {24, 29, 41, 255} }
@@ -598,17 +613,23 @@ run_picker :: proc(options: Options, snapshot: Snapshot, order: ^Order, path: st
                 name_text(font, source.name, gx+8, gy+88, 188, 28)
             }
             if count == 0 { text(font, "No matching windows", 30, 112, 22, {139, 151, 173, 255}) }
-            footer := "Type a key to switch · Space to start an app · Esc to cancel"
+            footer := "Tab / Shift+Tab · Enter/click to choose · Space to search · Esc to cancel"
             if status != "" { footer = status }
             if gesture.dragging && child < 0 { footer = "Release to save position · Esc to cancel drag" }
-            text(font, footer, 28, f32(height-35), 13, {139, 170, 192, 255}, f32(width-50))
-            if pages > 1 { text(font, fmt.tprintf("Page %d/%d · PgUp/PgDn", page+1, pages), 28, f32(height-57), 12, {139, 151, 173, 255}) }
+            if cols == 1 && status == "" && !gesture.dragging {
+                text(font, "Tab / Shift+Tab · Enter/click", 24, f32(height-56), 13, {139, 170, 192, 255}, f32(width-48))
+                text(font, "Space: search · Esc: cancel", 24, f32(height-35), 13, {139, 170, 192, 255}, f32(width-48))
+            } else {
+                text(font, footer, 24, f32(height-35), 13, {139, 170, 192, 255}, f32(width-48))
+            }
+            if pages > 1 { text(font, fmt.tprintf("Page %d/%d · PgUp/PgDn", page+1, pages), 24,
+                f32(height-57-(22 if cols == 1 else 0)), 12, {139, 151, 173, 255}) }
         } // Launcher replaces the icon grid and picker footer.
         rl.EndMode2D()
         rl.EndDrawing()
         if frame == 0 { startup_mark("first frame") }
         if needs_present {
-            response, ok := bridge("Present", {token=snapshot.token})
+            response, ok := bridge("Present", {token=snapshot.token, backdrop=options.backdrop})
             if !ok {
                 if frame == 0 { fail(response) }
                 status = response
@@ -632,7 +653,7 @@ run_picker :: proc(options: Options, snapshot: Snapshot, order: ^Order, path: st
 main :: proc() {
     started := time.tick_now()
     startup_profile = {enabled=env("BIFROST_TIMING") == "1", start=started, last=started}
-    options := parse_options()
+    options := parse_options(os.args[1:])
     defer bf_shutdown()
     if options.command == "hide" && options.demo { return }
     if !options.demo && options.command != "doctor" && options.command != "list" {
@@ -644,7 +665,7 @@ main :: proc() {
     snapshot: Snapshot
     if options.demo { snapshot = preview_snapshot() }
     else {
-        response, ok := bridge("Snapshot", {})
+        response, ok := bridge("Snapshot", {backdrop=options.backdrop && options.command == "toggle"})
         if !ok { fail(fmt.tprintf("GNOME bridge unavailable. Install/enable bifrost@dlb.local.\n%s", response)) }
         if json.unmarshal_string(response, &snapshot) != nil || snapshot.version != 1 || snapshot.token == "" {
             fail("unsupported or malformed GNOME bridge snapshot")

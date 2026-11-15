@@ -126,6 +126,15 @@ int bf_wayland_prepare(void) {
 }
 int bf_wayland_active(void) { return glfwGetPlatform() == 0x00060003; }
 
+extern void *glfwGetCurrentContext(void);
+extern void glfwSetWindowSizeLimits(void *, int, int, int, int);
+void bf_window_size_limits(int width, int height) {
+    // The window uses GLFW_RESIZABLE with equal min/max sizes. Updating both
+    // limits together avoids stale fixed-size Wayland constraints after a view
+    // change, while still keeping the panel at its content size.
+    glfwSetWindowSizeLimits(glfwGetCurrentContext(), width, height, width, height);
+}
+
 // GTK lookup runs in a separate process: GLFW/libdecor can load GTK3 while
 // the resolver uses GTK4. Loading both in this process breaks GtkIconTheme.
 static GSubprocess *icon_resolver;
@@ -182,16 +191,7 @@ char *bf_icon(const char *description) {
     g_free(decoded); g_free(line);
     return path;
 }
-// Resolve from the bridge first, then the desktop entry (including Flatpak
-// exports), then the app ID as an icon name. Do not substitute image-missing:
-// callers must be able to continue to the next application-specific candidate.
-char *bf_app_icon(const char *description, const char *app_id) {
-    error_set("");
-    char *path = bf_icon(description);
-    if (path) return path;
-    if (!app_id || !*app_id) return NULL;
-    char *desktop_id = g_str_has_suffix(app_id, ".desktop") ?
-        g_strdup(app_id) : g_strconcat(app_id, ".desktop", NULL);
+static GDesktopAppInfo *desktop_info(const char *desktop_id) {
     GDesktopAppInfo *info = g_desktop_app_info_new(desktop_id);
     if (!info && !strchr(desktop_id, '/')) {
         char *user_exports = g_build_filename(g_get_home_dir(), ".local", "share",
@@ -205,21 +205,71 @@ char *bf_app_icon(const char *description, const char *app_id) {
             g_free(system_exports);
         }
     }
+    return info;
+}
+
+// WM_CLASS and the desktop-file ID can differ (notably for Electron/AppImage
+// packages). Only accept a unique match; names/titles and fuzzy matches are not
+// reliable identities. The returned object owns a reference independent of apps.
+static GDesktopAppInfo *unique_desktop_match(GList *apps, const char *key, gboolean wm_class) {
+    GDesktopAppInfo *match = NULL;
+    for (GList *node = apps; node; node = node->next) {
+        if (!G_IS_DESKTOP_APP_INFO(node->data)) continue;
+        GDesktopAppInfo *info = G_DESKTOP_APP_INFO(node->data);
+        const char *candidate = wm_class ? g_desktop_app_info_get_startup_wm_class(info) :
+            g_app_info_get_id(G_APP_INFO(info));
+        if (!candidate || g_ascii_strcasecmp(candidate, key)) continue;
+        if (match) return NULL;
+        match = info;
+    }
+    return match ? g_object_ref(match) : NULL;
+}
+
+static char *desktop_info_icon(GDesktopAppInfo *info) {
+    if (!info) return NULL;
+    GIcon *icon = g_app_info_get_icon(G_APP_INFO(info));
+    if (!icon) return NULL;
+    char *serialized = g_icon_to_string(icon);
+    char *path = bf_icon(serialized);
+    g_free(serialized);
+    return path;
+}
+
+// Preserve the running-window identity: desktop matching is for icons only.
+// Exact descriptors/entries and declared StartupWMClass take precedence over
+// an app-ID icon, then a conservative trailing "-desktop" packaging alias.
+char *bf_app_icon(const char *description, const char *app_id) {
+    error_set("");
+    char *path = bf_icon(description);
+    if (path) return path;
+    if (!app_id || !*app_id) return NULL;
+    char *desktop_id = g_str_has_suffix(app_id, ".desktop") ?
+        g_strdup(app_id) : g_strconcat(app_id, ".desktop", NULL);
+    char *name = g_strndup(desktop_id, strlen(desktop_id) - strlen(".desktop"));
+    GDesktopAppInfo *info = desktop_info(desktop_id);
+    GList *apps = NULL;
+    if (!info) {
+        apps = g_app_info_get_all();
+        info = unique_desktop_match(apps, name, TRUE);
+    }
+    gboolean identified = info != NULL;
     if (info) {
-        GIcon *icon = g_app_info_get_icon(G_APP_INFO(info));
-        if (icon) {
-            char *serialized = g_icon_to_string(icon);
-            path = bf_icon(serialized);
-            g_free(serialized);
-        }
+        path = desktop_info_icon(info);
         g_object_unref(info);
     }
-    if (!path) {
-        char *name = g_strndup(desktop_id, strlen(desktop_id) - strlen(".desktop"));
-        path = bf_icon(name);
-        g_free(name);
+    if (!path) path = bf_icon(name);
+    size_t length = strlen(name);
+    if (!path && !identified && length > 8 && !g_ascii_strcasecmp(name + length - 8, "-desktop")) {
+        char *base = g_strndup(name, length - 8);
+        char *alias = g_strconcat(base, ".desktop", NULL);
+        info = desktop_info(alias);
+        if (!info) info = unique_desktop_match(apps, alias, FALSE);
+        path = desktop_info_icon(info);
+        g_clear_object(&info);
+        g_free(alias); g_free(base);
     }
-    g_free(desktop_id);
+    g_list_free_full(apps, g_object_unref);
+    g_free(name); g_free(desktop_id);
     return path;
 }
 

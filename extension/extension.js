@@ -2,12 +2,16 @@ import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import Meta from 'gi://Meta';
 import Shell from 'gi://Shell';
-import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
+import St from 'gi://St';
+import Clutter from 'gi://Clutter';
+import Mtk from 'gi://Mtk';
+import {Extension, InjectionManager} from 'resource:///org/gnome/shell/extensions/extension.js';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 
 const NAME = 'org.bifrost.WindowBridge';
 const PATH = '/org/bifrost/WindowBridge';
 const APP_ID = 'org.bifrost.Picker';
+const RUNTIME_NAME = 'org.bifrost.PickerRuntime';
 const XML = `<node><interface name="${NAME}">
   <method name="Snapshot"><arg type="s" direction="in"/><arg type="s" direction="out"/></method>
   <method name="Present"><arg type="s" direction="in"/><arg type="s" direction="out"/></method>
@@ -22,6 +26,14 @@ export default class BifrostBridge extends Extension {
         this._generation = GLib.uuid_string_random();
         this._sessions = new Map();
         this._sources = new Set();
+        this._animationOverrides = new InjectionManager();
+        this._animationOverrides.overrideMethod(Main.wm, '_shouldAnimateActor', original => function (actor, ...args) {
+            // A picker is an overlay, not a normal application opening. Avoid
+            // exposing the desktop through a scaled/faded picker at startup.
+            if (actor.meta_window?.get_wm_class() === APP_ID)
+                return false;
+            return original.call(this, actor, ...args);
+        });
         this._export = Gio.DBusExportedObject.wrapJSObject(XML, this);
         this._export.export(Gio.DBus.session, PATH);
         this._owner = Gio.bus_own_name_on_connection(Gio.DBus.session, NAME,
@@ -30,10 +42,14 @@ export default class BifrostBridge extends Extension {
             if (Main.sessionMode.isLocked) {
                 for (const session of this._sessions.values()) {
                     const picker = this._findPicker(session.token);
+                    this._retireSession(session.token);
                     picker?.delete(global.get_current_time());
                 }
-                this._sessions.clear();
             }
+        });
+        this._monitorSignal = Main.layoutManager.connect('monitors-changed', () => {
+            for (const session of this._sessions.values())
+                this._updateBackdrop(session);
         });
     }
 
@@ -42,13 +58,187 @@ export default class BifrostBridge extends Extension {
             GLib.source_remove(source);
         this._sources.clear();
         Main.sessionMode.disconnect(this._lockSignal);
+        Main.layoutManager.disconnect(this._monitorSignal);
         for (const session of this._sessions.values()) {
             const picker = this._findPicker(session.token);
+            this._retireSession(session.token);
             picker?.delete(global.get_current_time());
         }
         this._export.unexport();
         Gio.bus_unown_name(this._owner);
         this._sessions.clear();
+        this._animationOverrides.clear();
+    }
+
+    _destroyBackdrop(session) {
+        const backdrop = session.backdrop;
+        session.backdrop = null;
+        session.backdropTiles = [];
+        session.backdropPicker = null;
+        session.backdropCaptures = [];
+        session.backdropCaptureKey = null;
+        try {
+            backdrop?.destroy();
+        } finally {
+            if (session.unredirectDisabled) {
+                session.unredirectDisabled = false;
+                global.compositor.enable_unredirect();
+            }
+        }
+    }
+
+    _retireSession(token) {
+        const session = this._sessions.get(token);
+        if (!session)
+            return;
+        if (session.runtimeWatch) {
+            Gio.bus_unwatch_name(session.runtimeWatch);
+            session.runtimeWatch = 0;
+        }
+        this._destroyBackdrop(session);
+        for (const signal of session.pickerSignals ?? [])
+            session.picker.disconnect(signal);
+        if (session.pickerActorSignal)
+            session.pickerActor.disconnect(session.pickerActorSignal);
+        session.pickerSignals = [];
+        session.pickerActorSignal = 0;
+        session.pickerActor = null;
+        session.picker = null;
+        this._sessions.delete(token);
+    }
+
+    _watchPicker(session, picker) {
+        if (session.picker === picker)
+            return;
+        for (const signal of session.pickerSignals ?? [])
+            session.picker.disconnect(signal);
+        if (session.pickerActorSignal)
+            session.pickerActor.disconnect(session.pickerActorSignal);
+        session.picker = picker;
+        session.pickerActor = picker.get_compositor_private();
+        session.pickerSignals = [
+            picker.connect('unmanaged', () => this._retireSession(session.token)),
+            picker.connect('position-changed', () => this._updateBackdrop(session)),
+            picker.connect('size-changed', () => this._updateBackdrop(session)),
+        ];
+        session.pickerActorSignal = session.pickerActor.connect('notify::allocation',
+            () => this._updateBackdrop(session));
+    }
+
+    _backdropGeometryKey() {
+        return JSON.stringify(Main.layoutManager.monitors.map(({x, y, width, height}) =>
+            ({x, y, width, height})));
+    }
+
+    _captureBackdrop(session) {
+        // Normally called by Snapshot, before the native picker exists. For a
+        // monitor change or an older client, temporarily hide our actors only
+        // during the synchronous offscreen paint; no visible frame is emitted.
+        const backdrops = [...this._sessions.values()].map(s => s.backdrop).filter(a => a?.visible);
+        const pickers = global.get_window_actors().filter(actor =>
+            actor.visible && actor.meta_window?.get_wm_class() === APP_ID);
+        const inhibitUnredirect = !session.unredirectDisabled;
+        let inhibited = false;
+        session.capturingBackdrop = true;
+        try {
+            // Prepared images exist before there is a Meta.Window to watch.
+            // Release them if the native process exits during initialization.
+            if (!session.runtimeWatch) {
+                session.runtimeWatch = Gio.bus_watch_name_on_connection(Gio.DBus.session,
+                    RUNTIME_NAME, Gio.BusNameWatcherFlags.NONE, null,
+                    () => this._retireSession(session.token));
+            }
+            if (inhibitUnredirect) {
+                global.compositor.disable_unredirect();
+                inhibited = true;
+            }
+            for (const backdrop of backdrops) backdrop.hide();
+            for (const actor of pickers) actor.hide();
+            const captures = Main.layoutManager.monitors.map(({x, y, width, height}) => {
+                const rect = new Mtk.Rectangle({x, y, width, height});
+                // A blurred backdrop needs no full-resolution copy. Render all
+                // pixels into a fresh offscreen target, without a mouse cursor.
+                const content = global.stage.paint_to_content(rect, 0.5, null,
+                    Clutter.PaintFlag.NO_CURSORS | Clutter.PaintFlag.CLEAR);
+                if (!content)
+                    throw new Error('Could not prepare the desktop backdrop');
+                return {content};
+            });
+            session.backdropCaptures = captures;
+            session.backdropCaptureKey = this._backdropGeometryKey();
+        } finally {
+            for (const actor of pickers) actor.show();
+            for (const backdrop of backdrops) backdrop.show();
+            if (inhibited) global.compositor.enable_unredirect();
+            session.capturingBackdrop = false;
+        }
+    }
+
+    _updateBackdrop(session) {
+        if (!session.backdrop || !session.pickerActor || session.capturingBackdrop)
+            return;
+        if (session.backdropCaptureKey !== this._backdropGeometryKey())
+            this._captureBackdrop(session);
+        session.backdrop.set_size(global.stage.width, global.stage.height);
+        // Blur the frozen image itself. BACKGROUND mode reads the live stage
+        // framebuffer, which can contain incomplete/partially repainted regions.
+        const rectangles = Main.layoutManager.monitors;
+        for (let i = 0; i < rectangles.length; i++) {
+            let tile = session.backdropTiles[i];
+            if (!tile) {
+                tile = new St.Widget({
+                    name: 'bifrost-backdrop-region', reactive: false, can_focus: false,
+                });
+                // Attach before creating the effect so partial failures are
+                // owned by the backdrop and cleaned up with it.
+                session.backdrop.add_child(tile);
+                session.backdropTiles.push(tile);
+                tile.add_effect_with_name('bifrost-blur', new Shell.BlurEffect({
+                    radius: 32, brightness: 0.55, mode: Shell.BlurMode.ACTOR,
+                }));
+            }
+            tile.content = session.backdropCaptures[i].content;
+            const r = rectangles[i];
+            tile.set_position(r.x, r.y);
+            tile.set_size(r.width, r.height);
+        }
+        while (session.backdropTiles.length > rectangles.length)
+            session.backdropTiles.pop().destroy();
+        if (!session.backdropPicker) {
+            session.backdropPicker = new Clutter.Clone({
+                source: session.pickerActor, reactive: false,
+            });
+            session.backdrop.add_child(session.backdropPicker);
+        }
+        const [x, y] = session.pickerActor.get_transformed_position();
+        const [width, height] = session.pickerActor.get_transformed_size();
+        session.backdropPicker.set_position(x, y);
+        session.backdropPicker.set_size(width, height);
+        session.backdrop.set_child_above_sibling(session.backdropPicker, null);
+    }
+
+    _showBackdrop(session) {
+        if (!session.backdropEnabled) {
+            this._destroyBackdrop(session);
+            return;
+        }
+        if (session.backdropCaptureKey !== this._backdropGeometryKey())
+            this._captureBackdrop(session);
+        if (!session.backdrop) {
+            session.backdrop = new St.Widget({
+                name: 'bifrost-backdrop', reactive: false, can_focus: false,
+                layout_manager: new Clutter.FixedLayout(),
+            });
+            session.backdropTiles = [];
+            // A non-reactive clone keeps the picker sharp above the full blur;
+            // native pointer input/focus still belongs to the original window.
+            // No window actors are reparented. Background images stay in memory
+            // only and are discarded with this picker session.
+            Main.uiGroup.add_child(session.backdrop);
+            global.compositor.disable_unredirect();
+            session.unredirectDisabled = true;
+        }
+        this._updateBackdrop(session);
     }
 
     _windows() {
@@ -76,12 +266,13 @@ export default class BifrostBridge extends Extension {
         return session;
     }
 
-    Snapshot(_input) {
+    Snapshot(input) {
         if (Main.sessionMode.isLocked)
             throw new Error('Session is locked');
+        const request = JSON.parse(input);
         // Keep abandoned snapshots bounded (e.g. a crashed client).
         if (this._sessions.size >= 16)
-            this._sessions.delete(this._sessions.keys().next().value);
+            this._retireSession(this._sessions.keys().next().value);
         const token = GLib.uuid_string_random();
         const previous = global.display.focus_window;
         const [px, py] = global.get_pointer();
@@ -108,7 +299,15 @@ export default class BifrostBridge extends Extension {
                 monitor: w.get_monitor(),
             };
         });
-        this._sessions.set(token, {token, previous, workspace, monitor: index});
+        const session = {token, previous, workspace, monitor: index};
+        this._sessions.set(token, session);
+        try {
+            if (request.backdrop === true)
+                this._captureBackdrop(session);
+        } catch (error) {
+            this._retireSession(token);
+            throw error;
+        }
         return JSON.stringify({version: 1, token, generation: this._generation,
             workspace: workspace.index(), monitor: index,
             width: area.width, height: area.height, windows});
@@ -118,6 +317,17 @@ export default class BifrostBridge extends Extension {
         const picker = this._findPicker(session.token);
         if (!picker)
             return false;
+        const actor = picker.get_compositor_private();
+        if (!actor?.get_texture())
+            return false;
+        // Also finish any effect already running when this extension was
+        // enabled. Normalize before creating the sharp clone/backdrop.
+        actor.remove_all_transitions();
+        actor.set_pivot_point(0, 0);
+        actor.set_scale(1, 1);
+        actor.opacity = 255;
+        actor.translation_x = 0;
+        actor.translation_y = 0;
         const area = session.workspace.get_work_area_for_monitor(session.monitor);
         const rect = picker.get_frame_rect();
         picker.move_frame(true,
@@ -126,13 +336,17 @@ export default class BifrostBridge extends Extension {
         picker.make_above();
         picker.stick();
         Main.activateWindow(picker);
+        this._watchPicker(session, picker);
+        this._showBackdrop(session);
         return true;
     }
 
     PresentAsync([input], invocation) {
+        let session;
         try {
             const request = JSON.parse(input);
-            const session = this._session(request);
+            session = this._session(request);
+            session.backdropEnabled = request.backdrop !== false;
             // Usually the first submitted frame is already mapped. Avoid an
             // unconditional 25 ms timer before attempting to show it.
             if (this._presentPicker(session)) {
@@ -150,6 +364,7 @@ export default class BifrostBridge extends Extension {
                     }
                     invocation.return_value(new GLib.Variant('(s)', ['{"ok":true}']));
                 } catch (error) {
+                    this._destroyBackdrop(session);
                     invocation.return_dbus_error(`${NAME}.Failed`, error.message);
                 }
                 this._sources.delete(source);
@@ -157,6 +372,8 @@ export default class BifrostBridge extends Extension {
             });
             this._sources.add(source);
         } catch (error) {
+            if (session)
+                this._destroyBackdrop(session);
             invocation.return_dbus_error(`${NAME}.Failed`, error.message);
         }
     }
@@ -182,7 +399,7 @@ export default class BifrostBridge extends Extension {
                 if (!ok && ++attempts < 30 && !Main.sessionMode.isLocked)
                     return GLib.SOURCE_CONTINUE;
                 if (ok)
-                    this._sessions.delete(request.token);
+                    this._retireSession(request.token);
                 invocation.return_value(new GLib.Variant('(s)', [JSON.stringify({
                     ok, error: ok ? '' : 'GNOME did not grant focus to that window',
                 })]));
@@ -219,7 +436,7 @@ export default class BifrostBridge extends Extension {
             // Delegate desktop-file launch semantics to Shell; never interpret
             // search text or desktop Exec fields as shell commands ourselves.
             app.open_new_window(session.workspace.index());
-            this._sessions.delete(request.token);
+            this._retireSession(request.token);
             return '{"ok":true}';
         } catch (error) {
             return JSON.stringify({ok: false, error: error.message});
@@ -235,7 +452,7 @@ export default class BifrostBridge extends Extension {
         if (previous && picker && global.display.focus_window === picker &&
             global.get_window_actors().some(a => a.meta_window === previous))
             Main.activateWindow(previous);
-        this._sessions.delete(request.token);
+        this._retireSession(request.token);
         return '{"ok":true}';
     }
 }

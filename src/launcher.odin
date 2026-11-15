@@ -16,6 +16,7 @@ Launcher :: struct {
     cursor, selected, top: int,
     results: [dynamic]Search_Result,
     error, catalogue_error: string,
+    pointer: Pointer_Gesture,
 }
 
 // Optimal subsequence alignment: reward word starts and adjacent letters, and
@@ -110,6 +111,7 @@ launcher_refresh :: proc(state: ^Launcher) {
     query := utf8.runes_to_string(state.query[:], context.temp_allocator)
     state.results = search_apps(state.apps, query)
     state.selected, state.top = 0, 0
+    state.pointer = {}
     state.error = state.catalogue_error
 }
 

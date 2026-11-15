@@ -12,8 +12,18 @@ Implemented in `src/`, `native/`, and `extension/`:
   digit/letter keys, arrow navigation, and overflow pages.
 - Running-only groups, persistent relative application order, compact views,
   drag-and-drop reorder, and workspace/monitor/application invocation filters.
+- Grid dimensions approach a square of entries within the monitor's limits.
+  Window size follows each current view/page, without reserving room for larger
+  child views or unused rows on the final page.
 - GNOME 50 JavaScript bridge over session D-Bus: generation-aware snapshots,
   exact-window activation, pointer-monitor centering, and cancellation assistance.
+- Default-on desktop dimming/background blur supplied by GNOME across monitors,
+  using frozen in-memory desktop images with a sharp live picker above them and
+  `--no-backdrop` to disable it. Images are prepared before the picker exists;
+  blurring the images avoids sampling partially repainted live framebuffers.
+  Picker animations are suppressed without changing
+  other apps' animation policy. Effects track picker geometry and are retired
+  with the picker/session.
 - Native Wayland selection using raylib 6.2 modules linked to system GLFW 3.4;
   standalone icon-theme lookup, in-process SVG rasterization, and atomic state
   saves. See `README.md` for build/runtime requirements.
@@ -48,9 +58,10 @@ capabilities each platform exposes.
 
 ## Added application starter
 
-Space opens a text-only launcher in place of the icon grid. Installed desktop
+Space opens a launcher list with small app icons in place of the icon grid. Installed desktop
 applications are searched incrementally with fuzzy matching, returning at most
-ten results. Arrow keys select; Enter requests a launch through the GNOME bridge;
+ten results. Arrow keys or Tab/Shift+Tab highlight choices; Enter or a mouse click
+requests a launch through the GNOME bridge;
 Esc restores the picker. The launcher is independent of window filters and never
 executes query text as a command. This extends the initial window-switcher scope.
 
@@ -168,7 +179,8 @@ No GTK widgets are planned for the picker.
 Proposed visual design:
 
 - A centered, borderless panel on the pointer monitor, with generous spacing and
-  configurable colors. Transparency is optional; blur is not an MVP dependency.
+  configurable colors. GNOME supplies the default-on dimmed/blurred desktop
+  backdrop, independently of the opaque raylib picker.
 - Large icons (starting point: 96 logical pixels), application names below, and
   prominent digit/letter badges. Use a fixed cell size and column count per
   display profile. Keep the panel anchor stable when the entry count changes.
@@ -529,6 +541,8 @@ capabilities and explicit limitations rather than assumed Linux parity.
   a single-window group activates directly. Child titles disambiguate windows.
 - Digits and letters select the displayed target, including minimized and other-workspace
   windows; a modal dialog receives focus when it blocks its parent.
+- Tab/Shift+Tab cycle through applications, child windows, and launcher results;
+  Enter or a click selects. A stationary mouse does not override keyboard selection.
 - Disappearing targets, more than nine targets, key-alphabet overflow at both levels,
   and an empty session behave predictably.
 - Default scope is all; workspace/monitor/app filters compose correctly, preserve

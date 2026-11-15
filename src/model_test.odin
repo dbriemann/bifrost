@@ -3,6 +3,24 @@ package main
 import "core:encoding/json"
 import "core:testing"
 
+@(test)
+tab_navigation_wraps_and_reaches_targets_on_other_pages :: proc(t: ^testing.T) {
+    count, capacity := len(KEYS)+3, 12
+    selected := cycle_selection(capacity-1, count, false)
+    testing.expect_value(t, selected, capacity)
+    testing.expect_value(t, selected/capacity, 1)
+    selected = cycle_selection(selected, count, true)
+    testing.expect_value(t, selected/capacity, 0)
+    testing.expect_value(t, cycle_selection(count-1, count, false), 0)
+    selected = cycle_selection(0, count, true)
+    testing.expect_value(t, selected, count-1)
+    testing.expect_value(t, selected/capacity, 3)
+    testing.expect_value(t, cycle_selection(0, 1, false), 0)
+    testing.expect_value(t, cycle_selection(0, 1, true), 0)
+    testing.expect_value(t, cycle_selection(0, 0, false), 0)
+    testing.expect_value(t, cycle_selection(0, 0, true), 0)
+}
+
 test_windows :: proc() -> []Window {
     result := make([]Window, 4)
     result[0] = Window{id="a1", app="browser", name="Browser", workspace=0, monitor=0}

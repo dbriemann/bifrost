@@ -10,9 +10,34 @@ badges, and centered application names/window titles below each icon. Names
 use 45-pixel text with up to two lines, and selection keys use bold 51-pixel text.
 The heading shows `BIFROST (all windows)` or the active filter mode. Tile and row
 heights follow the text: single-line names leave only a small bottom padding,
-while longer names reserve a second line when needed. The grid
-fits within the monitor's work area, using fewer columns or overflow pages as
-needed; very small work areas reduce the overall scale to stay usable.
+while longer names reserve a second line when needed. The grid chooses nearly
+equal row and column counts: seven apps use three columns and three rows when
+the work area allows it. Each application/window view fits its own content,
+including a shorter final overflow page, with a small footer below the last row.
+Window size constraints update with the content so switching views does not
+leave an oversized panel. Monitor limits can produce a wider/narrower grid or
+overflow pages; very small work areas reduce the overall scale to stay usable.
+
+By default, GNOME dims and blurs the desktop around the picker across all
+monitors, including the top bar, while leaving the picker sharp. Use
+`bifrost --no-backdrop` to disable both effects for an invocation;
+`--backdrop` explicitly enables them. The backdrop follows picker size/position
+changes and is removed on selection, dismissal, native window loss, lock, or
+extension disable. It does not take keyboard/mouse focus. Each monitor's desktop
+image is captured into memory before the picker is created, then blurred and
+dimmed as frozen content. Background animations therefore pause visually while
+the picker is open; the picker itself remains live and interactive. Images are
+discarded with the picker session and are never saved to disk. `--no-backdrop`,
+`doctor`, and `list` skip image preparation.
+Each monitor uses one stable blur surface, with a sharp, non-reactive copy of the
+native picker drawn above it. This avoids both blur seams around a resizing
+cutout and live-framebuffer artifacts from partial screen repaints.
+Bifrost's own window animations are suppressed so it opens at full size without
+exposing the desktop beneath it; other applications keep their animation policy.
+The bridge waits for drawable picker content before presenting the backdrop.
+This implementation requires extension version 6; after installing its update, log out/in
+to reload the Shell extension. The extension-free `--demo` preview draws only the
+picker.
 
 Bifrost groups running windows by application. Groups with several windows show
 stacked icons and a count. Select a group to choose one of its windows; a group
@@ -35,7 +60,11 @@ Requirements for the initial **Linux x86-64** build:
   cannot conflict with the GTK version used by GLFW/libdecor. All UI rendering
   is raylib. The picker uses the
   application's icon supplied by GNOME, with desktop-entry and Flatpak-export
-  fallbacks. PNG and other common raster formats decode directly in raylib;
+  fallbacks. Unmatched window IDs can use a unique declared `StartupWMClass` or
+  a trailing `-desktop` packaging alias (for example, `mtgatool-desktop` uses
+  `mtgatool.desktop`). Matching affects icon lookup only; saved app identities
+  and ordering stay intact. Exact descriptors/entries take precedence, and
+  ambiguous metadata matches are rejected. PNG and other common raster formats decode directly in raylib;
   SVG icons rasterize in-process through librsvg. Missing icons are reported on
   stderr and fall back to an application tile.
 - Node.js to run the bridge logic tests.
@@ -103,10 +132,13 @@ counts.
 
 - **1–9, 0, a–z:** choose the labeled application/window. Letter choices follow
   the current keyboard layout; number-row and keypad digits also work.
-- **Arrows / Enter:** navigate and select. **PageUp/PageDown:** overflow pages.
+- **Tab / Shift+Tab:** highlight the next/previous application or window, wrapping
+  at the ends and changing overflow pages as needed. **Arrows** also navigate;
+  **Enter** selects the highlighted item. **PageUp/PageDown:** overflow pages.
 - **Space:** replace the icons with installed-app search. Type to fuzzy-match
-  names, executable names, keywords, and descriptions. **Up/Down** selects among
-  the best ten results; **Enter** starts the selected app and closes Bifrost.
+  names, executable names, keywords, and descriptions. **Up/Down** or
+  **Tab/Shift+Tab** selects among the best ten results; **Enter** or a mouse click
+  starts the selected app and closes Bifrost.
   Each result shows a small application icon matching the name's text size.
   **Esc** restores the previous picker view. Letters/digits edit the search while
   this mode is open, and spaces are ordinary input after entering the launcher.
@@ -117,6 +149,9 @@ counts.
 - **Click:** select. **Drag an application tile onto another or into a gap:**
   change saved order. A floating icon follows the pointer and an insertion marker
   shows the drop position. Normal hover highlighting pauses while dragging.
+  A stationary mouse leaves keyboard highlighting unchanged.
+  Pointer coordinates are converted through the drawing camera each frame so
+  resize/DPI callbacks cannot shift hover, click, or drag targets.
 - A second invocation or `bifrost hide` closes the visible picker. In this version,
   a second invocation with different filters also closes it; invoke again to open
   the new selection.
@@ -163,14 +198,24 @@ Demo selection displays the selected title instead of activating a real window.
 
 ## Verification and current limits
 
-Implemented checks: nineteen Odin search/model/font/image/interaction tests for drag gestures, drop
+Implemented checks: twenty-eight Odin search/model/font/image/interaction tests for drag gestures, drop
 targets, cancellation, grouping, persistence round-trip,
-compaction, filters, ordering, and key alphabet; fourteen mocked-compositor tests of
+compaction, filters, ordering, and key alphabet; twenty-nine mocked-compositor tests of
 the actual extension class; native icon lookup/SVG-to-RGBA and atomic state-write
 checks, isolated icon lookup with GTK3 preloaded, desktop-entry icon fallbacks,
+window-class/packaging-alias lookup with exact-entry priority and ambiguity checks,
 missing-icon rejection, PNG/SVG pixel
-checks, font glyph coverage, and Wayland position-call routing; compilation and
+checks, font glyph coverage, balanced/content-sized layouts and paged hit targets,
+Wayland position-call routing and content-size constraints; compilation and
 command-line validation.
+Backdrop checks cover stable full-monitor surfaces, sharp picker ordering, resizing,
+default/disabled behavior, actor reuse, and cleanup after selection, cancellation,
+native window loss, lock, extension disable, session eviction, and setup errors.
+Presentation checks cover waiting for drawable content, normalizing active picker
+effects, and preserving/restoring animation behavior for other applications.
+Frozen-image checks cover preparation before native window creation, reuse without
+recapture on picker updates, excluding old/current picker actors from captures,
+monitor refresh, failure recovery, and a client exiting before its window maps.
 
 **Live GNOME focus, window placement, fullscreen behavior, and rendering have not
 been validated in the development sandbox**, which blocks session D-Bus/Wayland
@@ -183,9 +228,15 @@ should exercise:
 4. Pointer-monitor placement on multiple displays and fullscreen applications.
 5. Drag reorder, close/reopen an app, then restart Bifrost and check saved order.
 6. Filtered shortcuts, a target closed while visible, and extension disable/lock.
-7. Space to search, rapid query edits, Up/Down/Enter, and Esc back to the same grid.
+7. Tab/Shift+Tab/Enter in both picker levels and search, including wraparound and
+   overflow pages with the mouse stationary over another target. Space to search,
+   rapid query edits, click a result to start it, and Esc back to the same grid.
 8. Launch an installed app that is not running, a terminal app, and a Flatpak app;
    check that a failed launch leaves the query intact.
+9. Default desktop dimming/blur across monitors, the sharp picker after
+   view/page changes, outside clicks and Esc, and `bifrost --no-backdrop`. Also
+   check startup without growth/white flashes, background without seams, and
+   cleanup if the native picker exits unexpectedly or the session locks.
 
 The executable currently runs only while the picker is open; there is no resident
 service or autostart setup. Each invocation reconnects and loads icons. GNOME 50

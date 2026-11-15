@@ -9,6 +9,16 @@
 static int backend = 0x00060003;
 static int gets, sets;
 static int platform_hint, decoration_hint, initialized, app_id_hint;
+static int size_limit_calls;
+void *glfwGetCurrentContext(void) { return (void *)1; }
+void glfwSetWindowSizeLimits(void *window, int min_w, int min_h, int max_w, int max_h) {
+    assert(window == (void *)1 && min_w == max_w && min_h == max_h);
+    // Cover a compact root view, a larger child/search view, then shrink again.
+    const int sizes[3][2] = {{1038, 933}, {1400, 1000}, {1038, 933}};
+    assert(size_limit_calls < 3);
+    assert(min_w == sizes[size_limit_calls][0] && min_h == sizes[size_limit_calls][1]);
+    ++size_limit_calls;
+}
 int glfwGetPlatform(void) { return backend; }
 int glfwPlatformSupported(int platform) {
     assert(platform == 0x00060003);
@@ -41,10 +51,16 @@ void __real_glfwSetWindowPos(void *window, int x, int y) {
 void __wrap_glfwGetWindowPos(void *, int *, int *);
 void __wrap_glfwSetWindowPos(void *, int, int);
 int bf_wayland_prepare(void);
+void bf_window_size_limits(int, int);
 int main(void) {
     assert(!setenv("WAYLAND_DISPLAY", "bifrost-test", 1));
     assert(bf_wayland_prepare() && initialized && app_id_hint == 1);
     puts("Native Wayland selected and unused libdecor disabled before initialization: OK");
+    bf_window_size_limits(1038, 933);
+    bf_window_size_limits(1400, 1000);
+    bf_window_size_limits(1038, 933);
+    assert(size_limit_calls == 3);
+    puts("Fixed content-size constraints update together when growing and shrinking: OK");
     int x = -1, y = -1;
     __wrap_glfwGetWindowPos((void *)1, &x, &y);
     assert(x == 0 && y == 0 && gets == 0);

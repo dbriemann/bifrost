@@ -27,6 +27,19 @@ int main(void) {
     char *entry = g_strdup_printf("[Desktop Entry]\nType=Application\nName=Fixture\nExec=/bin/true\nIcon=%s\n", fixture);
     assert(g_file_set_contents(desktop, entry, -1, NULL));
     g_free(entry);
+    char *png_fixture = g_build_filename(cwd, "tests", "fixtures", "app.png", NULL);
+    const char *extra_ids[] = {"org.bifrost.WindowClassFixture.desktop", "org.bifrost.SuffixFixture.desktop",
+        "org.bifrost.DuplicateA.desktop", "org.bifrost.DuplicateB.desktop",
+        "org.bifrost.ExactFixture.desktop", "org.bifrost.ExactFixture-desktop.desktop"};
+    const char *classes[] = {"BifrostWindowClass", "", "bifrost-shared-class", "bifrost-shared-class", "", ""};
+    char *extra_desktops[G_N_ELEMENTS(extra_ids)];
+    for (guint i = 0; i < G_N_ELEMENTS(extra_ids); i++) {
+        extra_desktops[i] = g_build_filename(applications, extra_ids[i], NULL);
+        const char *icon = (i == 0 || i == 3 || i == 5) ? png_fixture : fixture;
+        entry = g_strdup_printf("[Desktop Entry]\nType=Application\nName=Fixture\nExec=/bin/true\nIcon=%s\nStartupWMClass=%s\n", icon, classes[i]);
+        assert(g_file_set_contents(extra_desktops[i], entry, -1, NULL));
+        g_free(entry);
+    }
 
     // Reproduce libdecor's GTK3 dependency before asking for a GTK4-resolved
     // icon. The old in-process resolver fails to register GtkIconTheme here.
@@ -55,6 +68,26 @@ int main(void) {
     bf_free(resolved);
     puts("Desktop-entry icons, missing descriptor fallback, and placeholder rejection: OK");
 
+    resolved = bf_app_icon("", "BIFROSTWINDOWCLASS.desktop");
+    assert(resolved && !strcmp(resolved, png_fixture));
+    bf_free(resolved);
+    resolved = bf_app_icon("", "org.bifrost.SuffixFixture-desktop");
+    assert(resolved && !strcmp(resolved, fixture));
+    bf_free(resolved);
+    resolved = bf_app_icon("", "ORG.BIFROST.SUFFIXFIXTURE-DESKTOP");
+    assert(resolved && !strcmp(resolved, fixture));
+    bf_free(resolved);
+    // Exact descriptors and desktop IDs must win over matching/alias fallbacks.
+    resolved = bf_app_icon(fixture, "BifrostWindowClass");
+    assert(resolved && !strcmp(resolved, fixture));
+    bf_free(resolved);
+    resolved = bf_app_icon("", "org.bifrost.ExactFixture-desktop");
+    assert(resolved && !strcmp(resolved, png_fixture));
+    bf_free(resolved);
+    assert(!bf_app_icon("", "bifrost-shared-class"));
+    assert(!bf_app_icon("", "org.bifrost.SuffixFixture-desktop-helper"));
+    puts("Window-class matching, trailing -desktop aliases, exact-entry priority, and ambiguous-match rejection: OK");
+
     char *path = bf_icon("folder");
     assert(path && "GTK standalone icon-theme lookup failed");
     int width = 0, height = 0;
@@ -75,7 +108,11 @@ int main(void) {
     char contents[128] = {0};
     assert(fread(contents, 1, sizeof(contents)-1, f)); fclose(f);
     assert(strstr(contents, "terminal"));
+    for (guint i = 0; i < G_N_ELEMENTS(extra_desktops); i++) {
+        unlink(extra_desktops[i]); g_free(extra_desktops[i]);
+    }
     unlink(filename); unlink(desktop); rmdir(applications); rmdir(directory);
+    g_free(png_fixture);
     g_free(desktop); g_free(applications); g_free(fixture); g_free(cwd);
     puts("Atomic state replacement and permissions: OK");
     bf_shutdown();
