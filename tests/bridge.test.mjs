@@ -78,11 +78,48 @@ test('present centers only the matching picker and activates it', () => {
     f.windows.push(picker);
     const call = f.invocation();
     f.bridge.PresentAsync([JSON.stringify({token: s.token})], call);
-    f.tick();
+    // An already mapped picker must not wait for a timer tick.
     assert.equal(call.result.ok, true);
+    assert.equal(f.timers.size, 0);
     assert.deepEqual(picker.moved, {x: 1200, y: 200});
     assert.equal(f.global.display.focus_window, picker);
     assert.equal(JSON.parse(f.bridge.Snapshot('{}')).windows.length, 2);
+});
+
+test('present retries while mapping is pending and removes its timer when ready', () => {
+    const f = fixture();
+    const s = JSON.parse(f.bridge.Snapshot('{}'));
+    const call = f.invocation();
+    f.bridge.PresentAsync([JSON.stringify({token: s.token})], call);
+    assert.equal(call.result, null);
+    assert.equal(f.timers.size, 1);
+    f.tick();
+    assert.equal(call.result, null);
+    const picker = f.window(10, 'org.bifrost.Picker', `Bifrost · ${s.token}`);
+    f.windows.push(picker);
+    f.tick();
+    assert.equal(call.result.ok, true);
+    assert.equal(f.global.display.focus_window, picker);
+    assert.equal(f.timers.size, 0);
+    assert.equal(f.bridge._sources.size, 0);
+});
+
+test('present stops retrying when the picker never maps or the session locks', () => {
+    const f = fixture();
+    const s = JSON.parse(f.bridge.Snapshot('{}'));
+    const call = f.invocation();
+    f.bridge.PresentAsync([JSON.stringify({token: s.token})], call);
+    for (let i = 0; i < 60; i++) f.tick();
+    assert.match(call.error, /not found/);
+    assert.equal(f.timers.size, 0);
+    assert.equal(f.bridge._sources.size, 0);
+    const locked = f.invocation();
+    f.bridge.PresentAsync([JSON.stringify({token: s.token})], locked);
+    f.main.sessionMode.isLocked = true;
+    f.tick();
+    assert.match(locked.error, /locked/);
+    assert.equal(f.timers.size, 0);
+    assert.equal(f.bridge._sources.size, 0);
 });
 
 test('selects exact window, unminimizes, and retires the session', () => {

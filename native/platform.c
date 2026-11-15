@@ -117,6 +117,9 @@ int bf_wayland_prepare(void) {
     if (!getenv("WAYLAND_DISPLAY")) { error_set("WAYLAND_DISPLAY is absent: a Wayland session is required"); return 0; }
     if (!glfwPlatformSupported(0x00060003)) { error_set("System GLFW was built without Wayland support"); return 0; }
     glfwInitHint(0x00050003, 0x00060003);
+    // The picker is always borderless. Avoid loading libdecor's GTK plugin just
+    // to initialize client-side title bars that this window will never use.
+    glfwInitHint(0x00053001, 0x00038002); // WAYLAND_LIBDECOR = DISABLE_LIBDECOR
     if (!glfwInit()) { error_set("GLFW could not connect to the Wayland compositor"); return 0; }
     glfwWindowHintString(0x00026001, "org.bifrost.Picker");
     return 1;

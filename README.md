@@ -56,6 +56,10 @@ changes the Odin installation. `GLFW_LIBRARY`, `RAYLIB_DIR`, and `ODIN_BIN` may
 be set to override discovery. Small linker wrappers preserve our Wayland app
 ID when raylib resets window hints and bypass unsupported client-side window
 position calls on Wayland. The GNOME bridge handles actual placement. The binary remains linked to `libglfw.so.3`.
+The borderless picker disables GLFW's libdecor initialization to avoid loading
+unused client-side title bars and their GTK plugin during startup.
+Builds use Odin's speed optimization by default; `BIFROST_DEBUG=1 make` produces
+an unoptimized build with debug information.
 
 ## Install and run
 
@@ -161,7 +165,7 @@ Demo selection displays the selected title instead of activating a real window.
 
 Implemented checks: nineteen Odin search/model/font/image/interaction tests for drag gestures, drop
 targets, cancellation, grouping, persistence round-trip,
-compaction, filters, ordering, and key alphabet; twelve mocked-compositor tests of
+compaction, filters, ordering, and key alphabet; fourteen mocked-compositor tests of
 the actual extension class; native icon lookup/SVG-to-RGBA and atomic state-write
 checks, isolated icon lookup with GTK3 preloaded, desktop-entry icon fallbacks,
 missing-icon rejection, PNG/SVG pixel
@@ -187,6 +191,16 @@ The executable currently runs only while the picker is open; there is no residen
 service or autostart setup. Each invocation reconnects and loads icons. GNOME 50
 is the only declared extension target. Unicode glyph coverage depends on the
 chosen font. No native macOS or other compositor backend is implemented yet.
+
+Startup submits the complete picker before requesting GNOME presentation, without
+an extra blank frame. The bridge presents an already mapped window immediately;
+the 25 ms retry timer runs only while waiting for the window to map. To measure
+startup on your desktop, close the picker and run `BIFROST_TIMING=1 bifrost`.
+Stderr reports elapsed and per-stage times for the instance check, snapshot,
+saved order, Wayland connection, OpenGL window, fonts, icons, first submitted
+frame, and GNOME presentation request. Timing starts at `main`; it excludes
+shortcut dispatch, process loading, and compositor scanout, so it is not a full
+key-to-visible measurement.
 
 If the bridge is unavailable, inspect `gnome-extensions info bifrost@dlb.local`
 and Shell logs (`journalctl --user -b`, search for Bifrost). In-session extension

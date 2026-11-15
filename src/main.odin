@@ -6,6 +6,7 @@ import "core:fmt"
 import "core:os"
 import "core:strconv"
 import "core:strings"
+import "core:time"
 import rl "../build/rl"
 
 Options :: struct {
@@ -17,6 +18,18 @@ Options :: struct {
 }
 Reply :: struct { ok: bool, error: string }
 Request :: struct { token, id: string }
+
+Startup_Profile :: struct { enabled: bool, start, last: time.Tick }
+startup_profile: Startup_Profile
+
+startup_mark :: proc(stage: string) {
+    if !startup_profile.enabled { return }
+    now := time.tick_now()
+    fmt.eprintf("bifrost startup: %-18s %7.2f ms (+%.2f ms)\n", stage,
+        time.duration_milliseconds(time.tick_diff(startup_profile.start, now)),
+        time.duration_milliseconds(time.tick_diff(startup_profile.last, now)))
+    startup_profile.last = now
+}
 
 cstr :: proc(s: string) -> cstring { return strings.clone_to_cstring(s, context.temp_allocator) }
 env :: proc(key: string) -> string { return os.get_env(key, context.temp_allocator) }
@@ -260,6 +273,7 @@ run_picker :: proc(options: Options, snapshot: Snapshot, order: ^Order, path: st
     groups := build_groups(order^, snapshot, options.filter)
     defer free_groups(&groups)
     if bf_wayland_prepare() == 0 { fail(string(bf_error())) }
+    startup_mark("Wayland connection")
     // Draw and hit-test in the same logical grid, then enlarge the entire UI.
     // Reduce the scale only when even a single tile would exceed the work area.
     ui_scale := min(f32(1.5), f32(snapshot.width-16)/f32(CELL_WIDTH+48), f32(snapshot.height-16)/f32(CELL_HEIGHT+142))
@@ -279,6 +293,7 @@ run_picker :: proc(options: Options, snapshot: Snapshot, order: ^Order, path: st
     if !rl.IsWindowReady() { fail("raylib could not create its Wayland window") }
     defer rl.CloseWindow()
     if bf_wayland_active() == 0 { fail("picker did not use native Wayland") }
+    startup_mark("window and OpenGL")
     rl.SetExitKey(.KEY_NULL)
     rl.SetTargetFPS(60)
     rl.SetMouseScale(1/ui_scale, 1/ui_scale)
@@ -287,6 +302,7 @@ run_picker :: proc(options: Options, snapshot: Snapshot, order: ^Order, path: st
     defer if font.texture.id != rl.GetFontDefault().texture.id { rl.UnloadFont(font) }
     key_font := load_font(snapshot, bold=true)
     defer if key_font.texture.id != rl.GetFontDefault().texture.id { rl.UnloadFont(key_font) }
+    startup_mark("fonts")
     // Fit the window to the compact view heights, keeping its size stable when
     // opening a group or returning to applications.
     grid_height := 0
@@ -302,13 +318,7 @@ run_picker :: proc(options: Options, snapshot: Snapshot, order: ^Order, path: st
     icons := make(map[string]rl.Texture2D)
     for group in groups { icons[group.app] = load_icon(group.icon, group.app) }
     defer { for _, texture in icons { if texture.id != 0 { rl.UnloadTexture(texture) } }; delete(icons) }
-    if !options.demo {
-        // Flush the mapped native window before asking Shell to find and present it.
-        rl.BeginDrawing(); rl.ClearBackground({19, 23, 34, 255}); rl.EndDrawing()
-        response, ok := bridge("Present", {token = snapshot.token})
-        defer delete(response)
-        if !ok { fail(response) }
-    }
+    startup_mark("icons")
     grid_width, grid_window_height := width, height
     launcher := Launcher{}
     defer delete(launcher.query)
@@ -326,7 +336,9 @@ run_picker :: proc(options: Options, snapshot: Snapshot, order: ^Order, path: st
     launcher_font := rl.Font{}
     defer if launcher_font.texture.id != 0 && launcher_font.texture.id != rl.GetFontDefault().texture.id { rl.UnloadFont(launcher_font) }
     launcher_mouse := rl.GetMousePosition()
-    needs_present := false
+    // Submit the complete picker before asking Shell to present it. A separate
+    // blank frame here used to add a swap/frame wait to every invocation.
+    needs_present := !options.demo
     child, page, highlighted := -1, 0, 0
     gesture := Pointer_Gesture{}
     armed, done, activated, had_focus := true, false, false, false
@@ -594,10 +606,15 @@ run_picker :: proc(options: Options, snapshot: Snapshot, order: ^Order, path: st
         } // Launcher replaces the icon grid and picker footer.
         rl.EndMode2D()
         rl.EndDrawing()
+        if frame == 0 { startup_mark("first frame") }
         if needs_present {
             response, ok := bridge("Present", {token=snapshot.token})
-            if !ok { status = response } else { delete(response) }
+            if !ok {
+                if frame == 0 { fail(response) }
+                status = response
+            } else { delete(response) }
             needs_present = false
+            if frame == 0 { startup_mark("presented") }
         }
         frame += 1
         if options.frames > 0 && frame >= options.frames {
@@ -613,6 +630,8 @@ run_picker :: proc(options: Options, snapshot: Snapshot, order: ^Order, path: st
 }
 
 main :: proc() {
+    started := time.tick_now()
+    startup_profile = {enabled=env("BIFROST_TIMING") == "1", start=started, last=started}
     options := parse_options()
     defer bf_shutdown()
     if options.command == "hide" && options.demo { return }
@@ -621,6 +640,7 @@ main :: proc() {
         if result < 0 { fail(string(bf_error())) }
         if result == 0 || options.command == "hide" { return }
     }
+    startup_mark("instance")
     snapshot: Snapshot
     if options.demo { snapshot = preview_snapshot() }
     else {
@@ -636,11 +656,13 @@ main :: proc() {
             return
         }
     }
+    startup_mark("snapshot")
     if snapshot.width < 240 || snapshot.height < 320 { fail("monitor work area is too small for the picker") }
     path := state_path()
     order := Order{version = 1} if options.demo else load_order(path)
     if observe(&order, snapshot.windows) && !options.demo && !save_order(order, path) {
         fail(fmt.tprintf("could not save application order: %s", string(bf_error())))
     }
+    startup_mark("saved order")
     run_picker(options, snapshot, &order, path)
 }

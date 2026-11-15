@@ -33,5 +33,7 @@ cc -std=c11 -O2 -Wall -Wextra -Werror native/icon-resolver.c \
   $(pkg-config --cflags --libs gio-2.0) -ldl -o build/bifrost-icon-resolver
 cc -std=c11 -fPIC -O2 -Wall -Wextra -Werror -c native/platform.c -o build/platform.o $(pkg-config --cflags gio-unix-2.0)
 ar rcs build/libplatform.a build/platform.o
-"$ODIN_BIN" build src -out:build/bifrost -debug -extra-linker-flags:"$(pkg-config --libs gio-2.0) -Wl,--wrap=glfwDefaultWindowHints,--wrap=glfwGetWindowPos,--wrap=glfwSetWindowPos"
+build_flags=(-o:speed)
+if [[ "${BIFROST_DEBUG:-0}" == 1 ]]; then build_flags=(-debug -o:none); fi
+"$ODIN_BIN" build src -out:build/bifrost "${build_flags[@]}" -extra-linker-flags:"$(pkg-config --libs gio-2.0) -Wl,--wrap=glfwDefaultWindowHints,--wrap=glfwGetWindowPos,--wrap=glfwSetWindowPos"
 printf 'Built %s/build/bifrost\n' "$PWD"

@@ -114,28 +114,40 @@ export default class BifrostBridge extends Extension {
             width: area.width, height: area.height, windows});
     }
 
+    _presentPicker(session) {
+        const picker = this._findPicker(session.token);
+        if (!picker)
+            return false;
+        const area = session.workspace.get_work_area_for_monitor(session.monitor);
+        const rect = picker.get_frame_rect();
+        picker.move_frame(true,
+            area.x + Math.round((area.width - rect.width) / 2),
+            area.y + Math.round((area.height - rect.height) / 2));
+        picker.make_above();
+        picker.stick();
+        Main.activateWindow(picker);
+        return true;
+    }
+
     PresentAsync([input], invocation) {
         try {
             const request = JSON.parse(input);
             const session = this._session(request);
+            // Usually the first submitted frame is already mapped. Avoid an
+            // unconditional 25 ms timer before attempting to show it.
+            if (this._presentPicker(session)) {
+                invocation.return_value(new GLib.Variant('(s)', ['{"ok":true}']));
+                return;
+            }
             let attempts = 0;
             const source = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 25, () => {
                 try {
                     this._session(request);
-                    const picker = this._findPicker(session.token);
-                    if (!picker) {
+                    if (!this._presentPicker(session)) {
                         if (++attempts < 60)
                             return GLib.SOURCE_CONTINUE;
                         throw new Error('Native Wayland picker window not found');
                     }
-                    const area = session.workspace.get_work_area_for_monitor(session.monitor);
-                    const rect = picker.get_frame_rect();
-                    picker.move_frame(true,
-                        area.x + Math.round((area.width - rect.width) / 2),
-                        area.y + Math.round((area.height - rect.height) / 2));
-                    picker.make_above();
-                    picker.stick();
-                    Main.activateWindow(picker);
                     invocation.return_value(new GLib.Variant('(s)', ['{"ok":true}']));
                 } catch (error) {
                     invocation.return_dbus_error(`${NAME}.Failed`, error.message);
