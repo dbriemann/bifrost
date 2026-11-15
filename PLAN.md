@@ -46,6 +46,18 @@ first, with a planned macOS adapter. A separate Xorg backend is out of scope.
 Platform independence is a design goal, subject to the window-management
 capabilities each platform exposes.
 
+## Added application starter
+
+Space opens a text-only launcher in place of the icon grid. Installed desktop
+applications are searched incrementally with fuzzy matching, returning at most
+ten results. Arrow keys select; Enter requests a launch through the GNOME bridge;
+Esc restores the picker. The launcher is independent of window filters and never
+executes query text as a command. This extends the initial window-switcher scope.
+
+The catalogue and launch methods require version 2 of the Shell extension. The
+Odin search/editing model and bridge paths are automated-tested; live launcher
+rendering, keyboard routing, and application startup still need desktop validation.
+
 ## Confirmed requirements
 
 - Display one target per application as a large icon with a visible selection key.
@@ -540,8 +552,8 @@ as a release requirement. Check hidden CPU usage and memory for obvious leaks.
 
 ## Out of scope for the initial release
 
-- Xorg sessions, application launching, and background process management.
-- Window previews, fuzzy search, window rearrangement, and workspace management UI.
+- Xorg sessions and background process management.
+- Window previews, window rearrangement, and workspace management UI.
 - Universal compositor compatibility or heuristic restoration of window identities
   after logout/restart.
 - Automatic modification of the user's desktop shortcuts.

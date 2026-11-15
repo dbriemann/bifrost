@@ -71,6 +71,7 @@ Usage: bifrost [toggle|hide|doctor|list] [options]
   --frames N --screenshot FILE    Bounded demo rendering / PNG capture
 Keys: 1–9, 0, a–z select; arrows navigate; Enter selects; Esc goes back/cancels.
 PageUp/PageDown change overflow pages. Drag application tiles to save their order.
+Space opens installed-app search; type to filter, Up/Down to select, Enter to start.
 A second invocation closes the visible picker. Configuration: $XDG_STATE_HOME/bifrost/order.json`)
             os.exit(0)
         case: fail(fmt.tprintf("unknown argument: %s (see --help)", a))
@@ -308,6 +309,24 @@ run_picker :: proc(options: Options, snapshot: Snapshot, order: ^Order, path: st
         defer delete(response)
         if !ok { fail(response) }
     }
+    grid_width, grid_window_height := width, height
+    launcher := Launcher{}
+    defer delete(launcher.query)
+    defer delete(launcher.results)
+    defer {
+        if !options.demo {
+            for app in launcher.apps {
+                delete(app.id); delete(app.name); delete(app.description)
+                delete(app.keywords); delete(app.executable)
+            }
+        }
+        delete(launcher.apps)
+    }
+    launcher_active, catalogue_loaded := false, false
+    launcher_font := rl.Font{}
+    defer if launcher_font.texture.id != 0 && launcher_font.texture.id != rl.GetFontDefault().texture.id { rl.UnloadFont(launcher_font) }
+    launcher_mouse := rl.GetMousePosition()
+    needs_present := false
     child, page, highlighted := -1, 0, 0
     gesture := Pointer_Gesture{}
     armed, done, activated, had_focus := true, false, false, false
@@ -319,94 +338,162 @@ run_picker :: proc(options: Options, snapshot: Snapshot, order: ^Order, path: st
         focused := rl.IsWindowFocused()
         if focused { had_focus = true }
         if had_focus && !focused && !options.demo { break }
-        if !armed && !selection_held() { armed = true }
-        count := len(groups)
-        if child >= 0 { count = len(groups[child].windows) }
-        tile_height := view_tile_height(font, groups[:], snapshot, child)
-        cell_height := tile_height+12
-        capacity = min(len(KEYS), cols*max(1, (int(height)-142)/cell_height))
-        pages := max(1, (count + capacity - 1) / capacity)
-        visible := min(capacity, max(0, count - page*capacity))
-        mouse := rl.GetMousePosition()
-        pressed := rl.IsMouseButtonPressed(.LEFT)
-        down := rl.IsMouseButtonDown(.LEFT)
-        released := rl.IsMouseButtonReleased(.LEFT)
-        // Treat release-frame motion as a drag before resolving the drop target.
-        dropping := gesture.active && child < 0 &&
-            (gesture.dragging ||
-             (mouse.x-gesture.origin_x)*(mouse.x-gesture.origin_x) +
-             (mouse.y-gesture.origin_y)*(mouse.y-gesture.origin_y) >= 64)
-        hovered := pointer_target(mouse.x, mouse.y, cols, capacity, count, page, dropping, gesture.source, tile_height=tile_height, cell_height=cell_height)
-        escape := rl.IsKeyPressed(.ESCAPE)
-        pointer_was_active := gesture.active
-        pointer_action := pointer_step(&gesture, mouse.x, mouse.y, hovered,
-            pressed, down, released, child < 0, escape)
-        choose := -1
-        if escape {
-            if pointer_was_active { /* Cancelling the drag keeps the picker open. */ }
-            else if child >= 0 { child = -1; page = 0; highlighted = 0; status = "" }
-            else { done = true }
-        }
-        if !gesture.active && !escape && pointer_action.kind == .None {
-            if rl.IsKeyPressed(.PAGE_DOWN) { page = (page + 1) % pages; highlighted = page*capacity }
-            if rl.IsKeyPressed(.PAGE_UP) { page = (page + pages - 1) % pages; highlighted = page*capacity }
-            if count > 0 {
-                if rl.IsKeyPressed(.RIGHT) { highlighted = min(count-1, highlighted+1) }
-                if rl.IsKeyPressed(.LEFT) { highlighted = max(0, highlighted-1) }
-                if rl.IsKeyPressed(.DOWN) { highlighted = min(count-1, highlighted+cols) }
-                if rl.IsKeyPressed(.UP) { highlighted = max(0, highlighted-cols) }
-                page = highlighted / capacity
-                if rl.IsKeyPressed(.ENTER) && armed { choose = highlighted }
-            }
-            key := rl.GetKeyPressed()
-            for key != .KEY_NULL {
-                index := -1
-                n := int(key)
-                if n >= 48 && n <= 57 { index = (n - 49 + 10) % 10 }
-                if n >= 320 && n <= 329 { index = (n - 321 + 10) % 10 }
-                if armed && index >= 0 && index < visible { choose = page*capacity+index }
-                key = rl.GetKeyPressed()
-            }
-            cp := rl.GetCharPressed()
-            for cp != 0 {
-                if cp >= 'A' && cp <= 'Z' { cp += 'a'-'A' }
-                if armed && cp >= 'a' && cp <= 'z' {
-                    index := 10 + int(cp-'a')
-                    if index < visible { choose = page*capacity+index }
+        entering_launcher := !launcher_active && !gesture.active && rl.IsKeyPressed(.SPACE)
+        if entering_launcher {
+            launcher_active = true
+            launcher_mouse = rl.GetMousePosition()
+            gesture = {}
+            if !catalogue_loaded {
+                if options.demo {
+                    launcher.apps = make([]Launcher_App, len(groups))
+                    for group, i in groups {
+                        launcher.apps[i] = {id=group.app, name=group.name, description="Installed application preview"}
+                    }
+                    catalogue_loaded = true
+                } else {
+                    response, ok := bridge("Applications", {token=snapshot.token})
+                    catalogue: App_Catalogue
+                    if ok && json.unmarshal_string(response, &catalogue) == nil && catalogue.version == 1 {
+                        launcher.apps = catalogue.apps
+                        catalogue_loaded = true
+                        launcher.catalogue_error = ""
+                    } else {
+                        launcher.catalogue_error = "Cannot list apps; update and reload the GNOME extension"
+                        launcher.error = launcher.catalogue_error
+                    }
+                    delete(response)
                 }
-                cp = rl.GetCharPressed()
+                if catalogue_loaded {
+                    font_windows := make([]Window, len(launcher.apps))
+                    for app, i in launcher.apps { font_windows[i] = Window{name=app.name, title=app.description} }
+                    launcher_font = load_font(Snapshot{windows=font_windows})
+                    delete(font_windows)
+                }
             }
+            if catalogue_loaded { launcher_refresh(&launcher) }
+            width = max(grid_width, c.int(min(700, available_width-16)))
+            height = c.int(min(760, available_height-12))
+            rl.SetWindowSize(c.int(f32(width)*ui_scale), c.int(f32(height)*ui_scale))
+            needs_present = !options.demo
         }
-        switch pointer_action.kind {
-        case .Reorder:
-            reorder(order, groups[:], pointer_action.source, pointer_action.target)
-            free_groups(&groups)
-            groups = build_groups(order^, snapshot, options.filter)
-            highlighted = pointer_action.target
-            if options.demo { status = "Preview order changed (not saved)" }
-            else if save_order(order^, path) { status = "Application order saved" }
-            else { status = "Could not save order; changes last until exit" }
-        case .Select:
-            choose = pointer_action.target
-        case .None:
-        }
-        if choose >= 0 && choose < count && !done {
-            group := &groups[choose] if child < 0 else &groups[child]
-            if child < 0 && len(group.windows) > 1 {
-                child = choose; page = 0; highlighted = 0; armed = false; status = ""
-            } else {
-                index := group.windows[0] if child < 0 else group.windows[choose]
-                if options.demo { status = fmt.aprintf("Preview: %s", snapshot.windows[index].title) }
+        if launcher_active {
+            back, app_index := launcher_input(&launcher, width, height, entering_launcher, &launcher_mouse)
+            if back {
+                launcher_active = false
+                width, height = grid_width, grid_window_height
+                rl.SetWindowSize(c.int(f32(width)*ui_scale), c.int(f32(height)*ui_scale))
+                needs_present = !options.demo
+            } else if app_index >= 0 {
+                app := launcher.apps[app_index]
+                if options.demo { launcher.error = fmt.aprintf("Preview: would start %s", app.name) }
                 else {
-                    response, ok := bridge("Activate", {snapshot.token, snapshot.windows[index].id})
+                    response, ok := bridge("Launch", {token=snapshot.token, id=app.id})
                     reply: Reply
                     if ok && json.unmarshal_string(response, &reply) == nil && reply.ok { done = true; activated = true }
-                    else if !ok { status = response }
-                    else { status = reply.error }
+                    else { launcher.error = response if !ok else reply.error }
+                    if ok { delete(response) }
                 }
-                armed = false
             }
-        }
+            // Reuse picker textures and resolve other apps only when they appear
+            // in search results. Cache failed lookups too, avoiding frame retries.
+            if launcher_active {
+                for result in launcher.results {
+                    app := launcher.apps[result.index]
+                    if _, loaded := icons[app.id]; !loaded {
+                        icons[app.id] = load_icon("", app.id)
+                    }
+                }
+            }
+        } else {
+            if !armed && !selection_held() { armed = true }
+            count := len(groups)
+            if child >= 0 { count = len(groups[child].windows) }
+            tile_height := view_tile_height(font, groups[:], snapshot, child)
+            cell_height := tile_height+12
+            capacity = min(len(KEYS), cols*max(1, (int(height)-142)/cell_height))
+            pages := max(1, (count + capacity - 1) / capacity)
+            visible := min(capacity, max(0, count - page*capacity))
+            mouse := rl.GetMousePosition()
+            pressed := rl.IsMouseButtonPressed(.LEFT)
+            down := rl.IsMouseButtonDown(.LEFT)
+            released := rl.IsMouseButtonReleased(.LEFT)
+            // Treat release-frame motion as a drag before resolving the drop target.
+            dropping := gesture.active && child < 0 &&
+                (gesture.dragging ||
+                 (mouse.x-gesture.origin_x)*(mouse.x-gesture.origin_x) +
+                 (mouse.y-gesture.origin_y)*(mouse.y-gesture.origin_y) >= 64)
+            hovered := pointer_target(mouse.x, mouse.y, cols, capacity, count, page, dropping, gesture.source, tile_height=tile_height, cell_height=cell_height)
+            escape := rl.IsKeyPressed(.ESCAPE)
+            pointer_was_active := gesture.active
+            pointer_action := pointer_step(&gesture, mouse.x, mouse.y, hovered,
+                pressed, down, released, child < 0, escape)
+            choose := -1
+            if escape {
+                if pointer_was_active { /* Cancelling the drag keeps the picker open. */ }
+                else if child >= 0 { child = -1; page = 0; highlighted = 0; status = "" }
+                else { done = true }
+            }
+            if !gesture.active && !escape && pointer_action.kind == .None {
+                if rl.IsKeyPressed(.PAGE_DOWN) { page = (page + 1) % pages; highlighted = page*capacity }
+                if rl.IsKeyPressed(.PAGE_UP) { page = (page + pages - 1) % pages; highlighted = page*capacity }
+                if count > 0 {
+                    if rl.IsKeyPressed(.RIGHT) { highlighted = min(count-1, highlighted+1) }
+                    if rl.IsKeyPressed(.LEFT) { highlighted = max(0, highlighted-1) }
+                    if rl.IsKeyPressed(.DOWN) { highlighted = min(count-1, highlighted+cols) }
+                    if rl.IsKeyPressed(.UP) { highlighted = max(0, highlighted-cols) }
+                    page = highlighted / capacity
+                    if rl.IsKeyPressed(.ENTER) && armed { choose = highlighted }
+                }
+                key := rl.GetKeyPressed()
+                for key != .KEY_NULL {
+                    index := -1
+                    n := int(key)
+                    if n >= 48 && n <= 57 { index = (n - 49 + 10) % 10 }
+                    if n >= 320 && n <= 329 { index = (n - 321 + 10) % 10 }
+                    if armed && index >= 0 && index < visible { choose = page*capacity+index }
+                    key = rl.GetKeyPressed()
+                }
+                cp := rl.GetCharPressed()
+                for cp != 0 {
+                    if cp >= 'A' && cp <= 'Z' { cp += 'a'-'A' }
+                    if armed && cp >= 'a' && cp <= 'z' {
+                        index := 10 + int(cp-'a')
+                        if index < visible { choose = page*capacity+index }
+                    }
+                    cp = rl.GetCharPressed()
+                }
+            }
+            switch pointer_action.kind {
+            case .Reorder:
+                reorder(order, groups[:], pointer_action.source, pointer_action.target)
+                free_groups(&groups)
+                groups = build_groups(order^, snapshot, options.filter)
+                highlighted = pointer_action.target
+                if options.demo { status = "Preview order changed (not saved)" }
+                else if save_order(order^, path) { status = "Application order saved" }
+                else { status = "Could not save order; changes last until exit" }
+            case .Select:
+                choose = pointer_action.target
+            case .None:
+            }
+            if choose >= 0 && choose < count && !done {
+                group := &groups[choose] if child < 0 else &groups[child]
+                if child < 0 && len(group.windows) > 1 {
+                    child = choose; page = 0; highlighted = 0; armed = false; status = ""
+                } else {
+                    index := group.windows[0] if child < 0 else group.windows[choose]
+                    if options.demo { status = fmt.aprintf("Preview: %s", snapshot.windows[index].title) }
+                    else {
+                        response, ok := bridge("Activate", {snapshot.token, snapshot.windows[index].id})
+                        reply: Reply
+                        if ok && json.unmarshal_string(response, &reply) == nil && reply.ok { done = true; activated = true }
+                        else if !ok { status = response }
+                        else { status = reply.error }
+                    }
+                    armed = false
+                }
+            }
+        } // Picker input is inactive while the launcher owns the keyboard.
         rl.BeginDrawing()
         rl.ClearBackground({19, 23, 34, 255})
         rl.BeginMode2D(camera)
@@ -416,87 +503,102 @@ run_picker :: proc(options: Options, snapshot: Snapshot, order: ^Order, path: st
         if options.filter.monitor != -1 { mode = "monitor" }
         if options.filter.workspace != -1 && options.filter.monitor != -1 { mode = "workspace + monitor" }
         if options.filter.app != "" { mode = "application" }
+        if launcher_active { mode = "start app" }
         rl.DrawTextEx(key_font, "BIFROST", {28, 22}, 26, 2, {119, 144, 178, 255})
         brand_width := rl.MeasureTextEx(key_font, "BIFROST", 26, 2).x
         mode_x := 28 + brand_width + 12
         text(font, fmt.tprintf("(%s)", mode), mode_x, 27, 20,
             {139, 151, 173, 255}, max(0, f32(width)-mode_x-28))
         subheading := ""
-        if child >= 0 { subheading = fmt.tprintf("%s · Choose a window · Esc to go back", groups[child].name) }
+        if child >= 0 && !launcher_active { subheading = fmt.tprintf("%s · Choose a window · Esc to go back", groups[child].name) }
         if options.demo { subheading = fmt.tprintf("%s%sPreview", subheading, " · " if subheading != "" else "") }
         text(font, subheading, 28, 58, 14, {139, 151, 173, 255}, f32(width-56))
-        // Recompute after a view transition in this frame.
-        tile_height = view_tile_height(font, groups[:], snapshot, child)
-        cell_height = tile_height+12
-        capacity = min(len(KEYS), cols*max(1, (int(height)-142)/cell_height))
-        count = len(groups)
-        if child >= 0 { count = len(groups[child].windows) }
-        visible = min(capacity, max(0, count-page*capacity))
-        for local in 0..<visible {
-            index := page*capacity+local
-            group := &groups[index] if child < 0 else &groups[child]
-            x := f32(GRID_X + (local%cols)*CELL_WIDTH)
-            y := f32(GRID_Y + (local/cols)*cell_height)
-            tile := rl.Rectangle{x, y, TILE_WIDTH, f32(tile_height)}
-            hot := rl.CheckCollisionPointRec(mouse, tile)
-            if hot && !gesture.active { highlighted = index }
-            fill := rl.Color{29, 35, 49, 255}
-            if highlighted == index && !gesture.dragging { fill = {43, 57, 78, 255} }
-            if gesture.dragging && index == gesture.source { fill = {24, 29, 41, 255} }
-            rl.DrawRectangleRounded(tile, 0.15, 8, fill)
-            stack := min(3, len(group.windows)) if child < 0 else 1
-            texture := icons[group.app]
-            for layer := stack-1; layer >= 0; layer -= 1 {
-                offset := f32(layer*7)
-                destination := rl.Rectangle{x+62+offset, y+20-offset, 80, 80}
-                if texture.id != 0 {
-                    tint := rl.Color{255, 255, 255, 255} if layer == 0 else rl.Color{170, 181, 199, 210}
-                    rl.DrawTexturePro(texture, {0, 0, f32(texture.width), f32(texture.height)}, destination, {}, 0, tint)
-                } else {
-                    rl.DrawRectangleRounded(destination, 0.25, 8, {73, 104, 151, 255})
-                    text(font, "APP", destination.x+17, destination.y+25, 20, {239, 242, 249, 255})
-                }
-            }
-            rl.DrawRectangleRounded({x+7, y+7, 52, 54}, 0.2, 6, {9, 14, 24, 245})
-            alphabet := string(KEYS)
-            text(key_font, alphabet[local:local+1], x+7, y+14, 34, {157, 218, 244, 255}, 52, centered=true)
-            if child < 0 && len(group.windows) > 1 {
-                text(key_font, fmt.tprintf("%d", len(group.windows)), x+152, y+77, 30, {157, 218, 244, 255}, 48, centered=true)
-            }
-            title := group.name
-            if child >= 0 { title = snapshot.windows[group.windows[index]].title }
-            name_text(font, title, x+8, y+112, TILE_WIDTH-16)
-            if child >= 0 { text(font, group.name, x+8, y+f32(154+(name_lines(font, title)-1)*34), 22, {139, 151, 173, 255}, TILE_WIDTH-16, centered=true) }
-        }
-        if gesture.dragging && child < 0 {
-            if hovered >= 0 && hovered != gesture.source {
-                local := hovered-page*capacity
+        if launcher_active {
+            search_font := launcher_font if launcher_font.texture.id != 0 else font
+            launcher_draw(launcher, search_font, width, height, icons)
+        } else {
+            // Recompute after a view transition in this frame.
+            tile_height := view_tile_height(font, groups[:], snapshot, child)
+            cell_height := tile_height+12
+            capacity = min(len(KEYS), cols*max(1, (int(height)-142)/cell_height))
+            count := len(groups)
+            if child >= 0 { count = len(groups[child].windows) }
+            visible := min(capacity, max(0, count-page*capacity))
+            pages := max(1, (count+capacity-1)/capacity)
+            mouse := rl.GetMousePosition()
+            hovered := pointer_target(mouse.x, mouse.y, cols, capacity, count, page,
+                gesture.dragging, gesture.source, tile_height=tile_height, cell_height=cell_height)
+            for local in 0..<visible {
+                index := page*capacity+local
+                group := &groups[index] if child < 0 else &groups[child]
                 x := f32(GRID_X + (local%cols)*CELL_WIDTH)
                 y := f32(GRID_Y + (local/cols)*cell_height)
-                if gesture.source < hovered { x += TILE_WIDTH+2 } else { x -= 6 }
-                rl.DrawRectangle(c.int(x), c.int(y), 4, c.int(tile_height), {157, 218, 244, 255})
+                tile := rl.Rectangle{x, y, TILE_WIDTH, f32(tile_height)}
+                hot := rl.CheckCollisionPointRec(mouse, tile)
+                if hot && !gesture.active { highlighted = index }
+                fill := rl.Color{29, 35, 49, 255}
+                if highlighted == index && !gesture.dragging { fill = {43, 57, 78, 255} }
+                if gesture.dragging && index == gesture.source { fill = {24, 29, 41, 255} }
+                rl.DrawRectangleRounded(tile, 0.15, 8, fill)
+                stack := min(3, len(group.windows)) if child < 0 else 1
+                texture := icons[group.app]
+                for layer := stack-1; layer >= 0; layer -= 1 {
+                    offset := f32(layer*7)
+                    destination := rl.Rectangle{x+62+offset, y+20-offset, 80, 80}
+                    if texture.id != 0 {
+                        tint := rl.Color{255, 255, 255, 255} if layer == 0 else rl.Color{170, 181, 199, 210}
+                        rl.DrawTexturePro(texture, {0, 0, f32(texture.width), f32(texture.height)}, destination, {}, 0, tint)
+                    } else {
+                        rl.DrawRectangleRounded(destination, 0.25, 8, {73, 104, 151, 255})
+                        text(font, "APP", destination.x+17, destination.y+25, 20, {239, 242, 249, 255})
+                    }
+                }
+                rl.DrawRectangleRounded({x+7, y+7, 52, 54}, 0.2, 6, {9, 14, 24, 245})
+                alphabet := string(KEYS)
+                text(key_font, alphabet[local:local+1], x+7, y+14, 34, {157, 218, 244, 255}, 52, centered=true)
+                if child < 0 && len(group.windows) > 1 {
+                    text(key_font, fmt.tprintf("%d", len(group.windows)), x+152, y+77, 30, {157, 218, 244, 255}, 48, centered=true)
+                }
+                title := group.name
+                if child >= 0 { title = snapshot.windows[group.windows[index]].title }
+                name_text(font, title, x+8, y+112, TILE_WIDTH-16)
+                if child >= 0 { text(font, group.name, x+8, y+f32(154+(name_lines(font, title)-1)*34), 22, {139, 151, 173, 255}, TILE_WIDTH-16, centered=true) }
             }
-            source := groups[gesture.source]
-            gx := min(mouse.x+14, f32(width-214))
-            gy := min(mouse.y+14, f32(height-186))
-            rl.DrawRectangleRounded({gx, gy, 204, 172}, 0.15, 8, {48, 62, 84, 245})
-            texture := icons[source.app]
-            if texture.id != 0 {
-                rl.DrawTexturePro(texture, {0, 0, f32(texture.width), f32(texture.height)},
-                    {gx+70, gy+9, 64, 64}, {}, 0, {255, 255, 255, 235})
-            } else {
-                text(font, "APP", gx+83, gy+28, 20, {239, 242, 249, 255})
+            if gesture.dragging && child < 0 {
+                if hovered >= 0 && hovered != gesture.source {
+                    local := hovered-page*capacity
+                    x := f32(GRID_X + (local%cols)*CELL_WIDTH)
+                    y := f32(GRID_Y + (local/cols)*cell_height)
+                    if gesture.source < hovered { x += TILE_WIDTH+2 } else { x -= 6 }
+                    rl.DrawRectangle(c.int(x), c.int(y), 4, c.int(tile_height), {157, 218, 244, 255})
+                }
+                source := groups[gesture.source]
+                gx := min(mouse.x+14, f32(width-214))
+                gy := min(mouse.y+14, f32(height-186))
+                rl.DrawRectangleRounded({gx, gy, 204, 172}, 0.15, 8, {48, 62, 84, 245})
+                texture := icons[source.app]
+                if texture.id != 0 {
+                    rl.DrawTexturePro(texture, {0, 0, f32(texture.width), f32(texture.height)},
+                        {gx+70, gy+9, 64, 64}, {}, 0, {255, 255, 255, 235})
+                } else {
+                    text(font, "APP", gx+83, gy+28, 20, {239, 242, 249, 255})
+                }
+                name_text(font, source.name, gx+8, gy+88, 188, 28)
             }
-            name_text(font, source.name, gx+8, gy+88, 188, 28)
-        }
-        if count == 0 { text(font, "No matching windows", 30, 112, 22, {139, 151, 173, 255}) }
-        footer := "Type a key to switch · Drag to reorder · Esc to cancel"
-        if status != "" { footer = status }
-        if gesture.dragging && child < 0 { footer = "Release to save position · Esc to cancel drag" }
-        text(font, footer, 28, f32(height-35), 13, {139, 170, 192, 255}, f32(width-50))
-        if pages > 1 { text(font, fmt.tprintf("Page %d/%d · PgUp/PgDn", page+1, pages), 28, f32(height-57), 12, {139, 151, 173, 255}) }
+            if count == 0 { text(font, "No matching windows", 30, 112, 22, {139, 151, 173, 255}) }
+            footer := "Type a key to switch · Space to start an app · Esc to cancel"
+            if status != "" { footer = status }
+            if gesture.dragging && child < 0 { footer = "Release to save position · Esc to cancel drag" }
+            text(font, footer, 28, f32(height-35), 13, {139, 170, 192, 255}, f32(width-50))
+            if pages > 1 { text(font, fmt.tprintf("Page %d/%d · PgUp/PgDn", page+1, pages), 28, f32(height-57), 12, {139, 151, 173, 255}) }
+        } // Launcher replaces the icon grid and picker footer.
         rl.EndMode2D()
         rl.EndDrawing()
+        if needs_present {
+            response, ok := bridge("Present", {token=snapshot.token})
+            if !ok { status = response } else { delete(response) }
+            needs_present = false
+        }
         frame += 1
         if options.frames > 0 && frame >= options.frames {
             if options.screenshot != "" { rl.TakeScreenshot(cstr(options.screenshot)) }

@@ -3,7 +3,7 @@
 A keyboard-driven application/window picker for **GNOME 50 on Wayland**, written
 in **Odin**, drawn with **raylib**. A small GNOME Shell extension supplies window
 metadata, activation, and picker placement. Other compositors and macOS are
-planned; this first version implements the GNOME path.
+planned; this version implements the GNOME path, including an installed-app launcher.
 
 The picker uses a larger layout with 120-pixel icons, enlarged fonts and key
 badges, and centered application names/window titles below each icon. Names
@@ -100,6 +100,14 @@ counts.
 - **1–9, 0, a–z:** choose the labeled application/window. Letter choices follow
   the current keyboard layout; number-row and keypad digits also work.
 - **Arrows / Enter:** navigate and select. **PageUp/PageDown:** overflow pages.
+- **Space:** replace the icons with installed-app search. Type to fuzzy-match
+  names, executable names, keywords, and descriptions. **Up/Down** selects among
+  the best ten results; **Enter** starts the selected app and closes Bifrost.
+  Each result shows a small application icon matching the name's text size.
+  **Esc** restores the previous picker view. Letters/digits edit the search while
+  this mode is open, and spaces are ordinary input after entering the launcher.
+  **Left/Right, Home/End, Backspace/Delete** edit the query; **Ctrl+V** pastes and
+  **Ctrl+U** clears it. Mouse selection and scrolling also work.
 - **Esc:** return from windows to applications; at the root, dismiss. During a
   drag, cancel the drag. Cancelling restores prior focus if the picker still owns it.
 - **Click:** select. **Drag an application tile onto another or into a gap:**
@@ -108,6 +116,21 @@ counts.
 - A second invocation or `bifrost hide` closes the visible picker. In this version,
   a second invocation with different filters also closes it; invoke again to open
   the new selection.
+
+The launcher searches visible installed desktop applications, including Flatpak
+exports, regardless of the current window filters. Empty queries show up to ten
+apps alphabetically. Search updates after each edit; case-insensitive subsequence
+matching favors names, prefixes, word starts, and consecutive letters. Ties use
+application name and desktop ID for stable ordering. On smaller monitors only
+part of the top-ten list may fit; navigation scrolls the selected result into view.
+Launching goes through GNOME Shell on the workspace captured when Bifrost opened;
+desktop-file and application behavior determine whether an existing app creates
+a new window. Unavailable apps or rejected launches leave the search open with an
+error. Search text is never executed as a shell command.
+
+**Updating from the picker-only extension:** run `make install`, then **log out
+and back in** to load version 2 of the Shell bridge. Restarting the Bifrost binary
+alone does not load the new application-listing and launch methods into Shell.
 
 The picker appears on the pointer monitor and stays there while visible. Its
 application/window mappings are snapshots: newly opened windows appear next
@@ -136,9 +159,9 @@ Demo selection displays the selected title instead of activating a real window.
 
 ## Verification and current limits
 
-Implemented checks: fourteen Odin model/font/image/interaction tests for drag gestures, drop
+Implemented checks: nineteen Odin search/model/font/image/interaction tests for drag gestures, drop
 targets, cancellation, grouping, persistence round-trip,
-compaction, filters, ordering, and key alphabet; eight mocked-compositor tests of
+compaction, filters, ordering, and key alphabet; twelve mocked-compositor tests of
 the actual extension class; native icon lookup/SVG-to-RGBA and atomic state-write
 checks, isolated icon lookup with GTK3 preloaded, desktop-entry icon fallbacks,
 missing-icon rejection, PNG/SVG pixel
@@ -156,6 +179,9 @@ should exercise:
 4. Pointer-monitor placement on multiple displays and fullscreen applications.
 5. Drag reorder, close/reopen an app, then restart Bifrost and check saved order.
 6. Filtered shortcuts, a target closed while visible, and extension disable/lock.
+7. Space to search, rapid query edits, Up/Down/Enter, and Esc back to the same grid.
+8. Launch an installed app that is not running, a terminal app, and a Flatpak app;
+   check that a failed launch leaves the query intact.
 
 The executable currently runs only while the picker is open; there is no resident
 service or autostart setup. Each invocation reconnects and loads icons. GNOME 50

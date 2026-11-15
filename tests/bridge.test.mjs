@@ -58,7 +58,7 @@ function fixture() {
     const invocation = () => ({result: null, error: null,
         return_value(value) { this.result = JSON.parse(value.value[0]); },
         return_dbus_error(_name, value) { this.error = value; }});
-    return {bridge, global, main, window, windows, timers, tick, invocation};
+    return {bridge, global, main, window, windows, timers, tick, invocation, Gio, Shell};
 }
 
 test('snapshot sorts stable window identities and captures pointer monitor', () => {
@@ -159,4 +159,57 @@ test('activation waits for focus and reports compositor rejection', () => {
     for (let i = 0; i < 30; i++) f.tick();
     assert.equal(call.result.ok, false);
     assert.match(call.result.error, /focus/);
+});
+
+
+test('launcher catalogue includes visible installed apps and metadata only', () => {
+    const f = fixture();
+    const s = JSON.parse(f.bridge.Snapshot('{}'));
+    const info = (id, show) => ({should_show: () => show, get_id: () => id,
+        get_display_name: () => 'Text Editor', get_description: () => 'Edit text',
+        get_keywords: () => ['text', 'editor'], get_executable: () => 'gnome-text-editor'});
+    f.Gio.AppInfo = {get_all: () => [info('editor.desktop', true), info('hidden.desktop', false), info('', true)]};
+    const catalogue = JSON.parse(f.bridge.Applications(JSON.stringify({token: s.token})));
+    assert.equal(catalogue.version, 1);
+    assert.equal(catalogue.apps.length, 1);
+    assert.equal(catalogue.apps[0].id, 'editor.desktop');
+    assert.equal(catalogue.apps[0].keywords, 'text editor');
+    assert.equal(catalogue.apps[0].executable, 'gnome-text-editor');
+});
+
+test('launcher starts the exact desktop app on the captured workspace', () => {
+    const f = fixture();
+    const s = JSON.parse(f.bridge.Snapshot('{}'));
+    const launches = [];
+    f.Shell.AppSystem = {get_default: () => ({lookup_app: id => id === 'editor.desktop' ? {
+        get_app_info: () => ({should_show: () => true}),
+        open_new_window: workspace => launches.push({id, workspace}),
+    } : null})};
+    const reply = JSON.parse(f.bridge.Launch(JSON.stringify({token: s.token, id: 'editor.desktop'})));
+    assert.equal(reply.ok, true);
+    assert.deepEqual(launches, [{id: 'editor.desktop', workspace: 2}]);
+    assert.throws(() => f.bridge.Dismiss(JSON.stringify({token: s.token})), /expired/);
+});
+
+test('launcher launch errors and vanished apps keep the picker session usable', () => {
+    const f = fixture();
+    const s = JSON.parse(f.bridge.Snapshot('{}'));
+    f.Shell.AppSystem = {get_default: () => ({lookup_app: id => id === 'broken.desktop' ? {
+        get_app_info: () => ({should_show: () => true}),
+        open_new_window: () => { throw new Error('Cannot start application'); },
+    } : null})};
+    const request = id => JSON.stringify({token: s.token, id});
+    assert.equal(JSON.parse(f.bridge.Launch(request('missing.desktop'))).ok, false);
+    assert.match(JSON.parse(f.bridge.Launch(request('broken.desktop'))).error, /Cannot start/);
+    assert.equal(JSON.parse(f.bridge.Launch(request('; touch /tmp/not-a-command'))).ok, false);
+    assert.doesNotThrow(() => f.bridge.Dismiss(JSON.stringify({token: s.token})));
+});
+
+test('launcher requests reject locked and stale sessions before accessing apps', () => {
+    const f = fixture();
+    const s = JSON.parse(f.bridge.Snapshot('{}'));
+    assert.throws(() => f.bridge.Applications(JSON.stringify({token: 'stale'})), /expired/);
+    f.main.sessionMode.isLocked = true;
+    assert.throws(() => f.bridge.Applications(JSON.stringify({token: s.token})), /locked/);
+    assert.throws(() => f.bridge.Launch(JSON.stringify({token: s.token, id: 'editor.desktop'})), /locked/);
 });

@@ -12,6 +12,8 @@ const XML = `<node><interface name="${NAME}">
   <method name="Snapshot"><arg type="s" direction="in"/><arg type="s" direction="out"/></method>
   <method name="Present"><arg type="s" direction="in"/><arg type="s" direction="out"/></method>
   <method name="Activate"><arg type="s" direction="in"/><arg type="s" direction="out"/></method>
+  <method name="Applications"><arg type="s" direction="in"/><arg type="s" direction="out"/></method>
+  <method name="Launch"><arg type="s" direction="in"/><arg type="s" direction="out"/></method>
   <method name="Dismiss"><arg type="s" direction="in"/><arg type="s" direction="out"/></method>
 </interface></node>`;
 
@@ -178,6 +180,37 @@ export default class BifrostBridge extends Extension {
             this._sources.add(source);
         } catch (error) {
             invocation.return_dbus_error(`${NAME}.Failed`, error.message);
+        }
+    }
+
+    Applications(input) {
+        this._session(JSON.parse(input));
+        const apps = Gio.AppInfo.get_all()
+            .filter(info => info.should_show() && info.get_id())
+            .map(info => ({
+                id: info.get_id(),
+                name: info.get_display_name() ?? info.get_name() ?? '',
+                description: info.get_description() ?? '',
+                keywords: (info.get_keywords?.() ?? []).join(' '),
+                executable: info.get_executable() ?? '',
+            }));
+        return JSON.stringify({version: 1, apps});
+    }
+
+    Launch(input) {
+        const request = JSON.parse(input);
+        const session = this._session(request);
+        const app = Shell.AppSystem.get_default().lookup_app(request.id);
+        if (!app || !app.get_app_info()?.should_show())
+            return JSON.stringify({ok: false, error: 'Application is no longer available'});
+        try {
+            // Delegate desktop-file launch semantics to Shell; never interpret
+            // search text or desktop Exec fields as shell commands ourselves.
+            app.open_new_window(session.workspace.index());
+            this._sessions.delete(request.token);
+            return '{"ok":true}';
+        } catch (error) {
+            return JSON.stringify({ok: false, error: error.message});
         }
     }
 
