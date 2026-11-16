@@ -6,15 +6,18 @@ import "core:unicode/utf8"
 import rl "../build/rl"
 
 LAUNCHER_LIST_Y :: 158
-LAUNCHER_ROW_HEIGHT :: 48
+LAUNCHER_ROW_HEIGHT :: 56
 LAUNCHER_ICON_SIZE :: 24
+LAUNCHER_DETAIL_FONT_SIZE :: 20
 
 key_edit :: proc(key: rl.KeyboardKey) -> bool {
     return rl.IsKeyPressed(key) || rl.IsKeyPressedRepeat(key)
 }
 
 launcher_visible_rows :: proc(height: c.int) -> int {
-    return max(1, min(LAUNCHER_LIMIT, (int(height)-210)/LAUNCHER_ROW_HEIGHT))
+    // Leave room for larger footer text and two instruction lines on narrow views.
+    footer_height := FOOTER_TEXT_BOTTOM+FOOTER_LINE_HEIGHT+FOOTER_DETAIL_HEIGHT+14
+    return max(1, min(LAUNCHER_LIMIT, (int(height)-LAUNCHER_LIST_Y-footer_height)/LAUNCHER_ROW_HEIGHT))
 }
 
 // A click must begin and end on the same result. Reuse the tile gesture rules
@@ -46,6 +49,7 @@ launcher_input :: proc(state: ^Launcher, width, height: c.int, entering: bool,
     if rl.IsKeyPressed(.ESCAPE) { state.pointer = {}; return true, -1 }
     changed := false
     control := rl.IsKeyDown(.LEFT_CONTROL) || rl.IsKeyDown(.RIGHT_CONTROL)
+    when ODIN_OS == .Darwin { control = control || rl.IsKeyDown(.LEFT_SUPER) || rl.IsKeyDown(.RIGHT_SUPER) }
     if key_edit(.BACKSPACE) { changed = launcher_backspace(state) }
     if key_edit(.DELETE) { changed = launcher_delete(state) || changed }
     if control && rl.IsKeyPressed(.U) {
@@ -146,14 +150,21 @@ launcher_draw :: proc(state: Launcher, font: rl.Font, width, height: c.int, icon
         label_width := f32(width)-label_x-42
         text(font, app.name, label_x, y+3, 24, {239, 242, 249, 255}, label_width)
         detail := app.description if app.description != "" else app.id
-        text(font, detail, label_x, y+29, 13, {139, 151, 173, 255}, label_width)
+        text(font, detail, label_x, y+29, LAUNCHER_DETAIL_FONT_SIZE, {164, 178, 198, 255}, label_width)
     }
     if len(state.results) == 0 && state.error == "" {
         text(font, "No matching applications", 42, LAUNCHER_LIST_Y+12, 22, {139, 151, 173, 255}, available)
     }
     footer := "Tab / Shift+Tab or arrows · Enter/click to start · Esc to return"
     if state.error != "" { footer = state.error }
-    text(font, footer, 28, f32(height-35), 13, {139, 170, 192, 255}, f32(width-56))
-    text(font, fmt.tprintf("%d results", len(state.results)), 28, f32(height-55), 12,
+    compact := state.error == "" && rl.MeasureTextEx(font, cstr(footer), FOOTER_FONT_SIZE, 0).x > f32(width-56)
+    footer_y := height-FOOTER_TEXT_BOTTOM-(FOOTER_LINE_HEIGHT if compact else 0)
+    if compact {
+        text(font, "Tab/Shift+Tab or arrows · Enter/click: start", 28, f32(footer_y), FOOTER_FONT_SIZE, {139, 170, 192, 255}, f32(width-56))
+        text(font, "Esc: return", 28, f32(footer_y+FOOTER_LINE_HEIGHT), FOOTER_FONT_SIZE, {139, 170, 192, 255}, f32(width-56))
+    } else {
+        text(font, footer, 28, f32(footer_y), FOOTER_FONT_SIZE, {139, 170, 192, 255}, f32(width-56))
+    }
+    text(font, fmt.tprintf("%d results", len(state.results)), 28, f32(footer_y-FOOTER_DETAIL_HEIGHT), FOOTER_DETAIL_FONT_SIZE,
         {139, 151, 173, 255}, f32(width-56))
 }

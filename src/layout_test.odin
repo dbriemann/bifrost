@@ -19,11 +19,11 @@ grid_balances_rows_and_columns_for_the_current_item_count :: proc(t: ^testing.T)
 grid_window_fits_content_and_does_not_reserve_other_views_or_empty_page_rows :: proc(t: ^testing.T) {
     root := grid_layout(7, 154, 1400, 1000)
     testing.expect_value(t, root.width, 692)
-    testing.expect_value(t, root.height, 622)
+    testing.expect_value(t, root.height, 628)
     child := grid_layout(2, 222, 1400, 1000)
     testing.expect_value(t, child.cols, 2)
     testing.expect_value(t, child.rows, 1)
-    testing.expect_value(t, child.height, GRID_Y+222+GRID_FOOTER)
+    testing.expect_value(t, child.height, GRID_Y+222+GRID_FOOTER+FOOTER_LINE_HEIGHT)
     restored := grid_layout(7, 154, 1400, 1000)
     testing.expect_value(t, restored.width, root.width)
     testing.expect_value(t, restored.height, root.height)
@@ -41,7 +41,7 @@ grid_window_fits_content_and_does_not_reserve_other_views_or_empty_page_rows :: 
 grid_fits_small_monitors_and_keeps_paged_hit_targets_aligned :: proc(t: ^testing.T) {
     for tile_height in ([3]int{154, 188, 222}) {
         for width in ([4]int{268, 472, 692, 1400}) {
-            for height in ([3]int{410, 600, 1000}) {
+            for height in ([3]int{GRID_Y+222+grid_footer_height(1, true), 600, 1000}) {
                 for count in ([12]int{0, 1, 2, 3, 7, 10, 17, 35, 36, 37, 40, 73}) {
                     first := grid_layout(count, tile_height, width, height)
                     testing.expect(t, first.capacity > 0 && first.capacity <= len(KEYS))

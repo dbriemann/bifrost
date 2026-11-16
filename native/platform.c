@@ -113,7 +113,7 @@ char *bf_poll(void) {
         g_main_context_iteration(NULL, FALSE);
     char *result = command; command = NULL; return result;
 }
-int bf_wayland_prepare(void) {
+int bf_display_prepare(void) {
     if (!getenv("WAYLAND_DISPLAY")) { error_set("WAYLAND_DISPLAY is absent: a Wayland session is required"); return 0; }
     if (!glfwPlatformSupported(0x00060003)) { error_set("System GLFW was built without Wayland support"); return 0; }
     glfwInitHint(0x00050003, 0x00060003);
@@ -124,7 +124,7 @@ int bf_wayland_prepare(void) {
     glfwWindowHintString(0x00026001, "org.bifrost.Picker");
     return 1;
 }
-int bf_wayland_active(void) { return glfwGetPlatform() == 0x00060003; }
+int bf_display_active(void) { return glfwGetPlatform() == 0x00060003; }
 
 extern void *glfwGetCurrentContext(void);
 extern void glfwSetWindowSizeLimits(void *, int, int, int, int);

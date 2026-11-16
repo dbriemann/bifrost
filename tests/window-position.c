@@ -50,11 +50,11 @@ void __real_glfwSetWindowPos(void *window, int x, int y) {
 }
 void __wrap_glfwGetWindowPos(void *, int *, int *);
 void __wrap_glfwSetWindowPos(void *, int, int);
-int bf_wayland_prepare(void);
+int bf_display_prepare(void);
 void bf_window_size_limits(int, int);
 int main(void) {
     assert(!setenv("WAYLAND_DISPLAY", "bifrost-test", 1));
-    assert(bf_wayland_prepare() && initialized && app_id_hint == 1);
+    assert(bf_display_prepare() && initialized && app_id_hint == 1);
     puts("Native Wayland selected and unused libdecor disabled before initialization: OK");
     bf_window_size_limits(1038, 933);
     bf_window_size_limits(1400, 1000);

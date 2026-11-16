@@ -140,14 +140,14 @@ launcher_drags_padding_and_release_on_another_result_do_not_start_apps :: proc(t
     defer delete(state.results)
     append(&state.results, Search_Result{index=7}, Search_Result{index=2})
     launcher_pointer_step(&state, 45, LAUNCHER_LIST_Y+5, 700, 760, true, true, false, false)
-    testing.expect_value(t, launcher_pointer_step(&state, 45, LAUNCHER_LIST_Y+53,
+    testing.expect_value(t, launcher_pointer_step(&state, 45, LAUNCHER_LIST_Y+LAUNCHER_ROW_HEIGHT+5,
         700, 760, false, false, true, true), -1)
     launcher_pointer_step(&state, 45, LAUNCHER_LIST_Y+5, 700, 760, true, true, false, false)
     testing.expect_value(t, launcher_pointer_step(&state, 80, LAUNCHER_LIST_Y+5,
         700, 760, false, false, true, true), -1)
     // Text field, row separator, panel padding, empty rows, and clipped rows.
-    for point in ([6][2]f32{{45,100}, {45,LAUNCHER_LIST_Y+47}, {20,LAUNCHER_LIST_Y+5},
-        {680,LAUNCHER_LIST_Y+5}, {45,LAUNCHER_LIST_Y+101}, {45,LAUNCHER_LIST_Y+53}}) {
+    for point in ([6][2]f32{{45,100}, {45,LAUNCHER_LIST_Y+LAUNCHER_ROW_HEIGHT-1}, {20,LAUNCHER_LIST_Y+5},
+        {680,LAUNCHER_LIST_Y+5}, {45,LAUNCHER_LIST_Y+2*LAUNCHER_ROW_HEIGHT+5}, {45,LAUNCHER_LIST_Y+LAUNCHER_ROW_HEIGHT+5}}) {
         launcher_pointer_step(&state, point[0], point[1], 700, 258, true, true, false, false)
         testing.expect_value(t, launcher_pointer_step(&state, point[0], point[1],
             700, 258, false, false, true, false), -1)

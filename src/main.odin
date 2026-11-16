@@ -16,6 +16,7 @@ Options :: struct {
     backdrop: bool,
     frames: int,
     screenshot: string,
+    scale: f32,
 }
 Reply :: struct { ok: bool, error: string }
 Request :: struct { token, id: string, backdrop: bool }
@@ -34,7 +35,21 @@ startup_mark :: proc(stage: string) {
 
 cstr :: proc(s: string) -> cstring { return strings.clone_to_cstring(s, context.temp_allocator) }
 env :: proc(key: string) -> string { return os.get_env(key, context.temp_allocator) }
-fail :: proc(message: string) { fmt.eprintln("bifrost:", message); os.exit(1) }
+launcher_report :: proc(name: string, value: int) {
+    when ODIN_OS == .Darwin {
+        directory := env("BIFROST_LAUNCH_DIR")
+        if directory != "" {
+            if bf_save(cstr(fmt.tprintf("%s/%s", directory, name)), cstr(fmt.tprintf("%d", value))) == 0 {
+                fmt.eprintln("bifrost: could not report status to command launcher")
+            }
+        }
+    }
+}
+fail :: proc(message: string) {
+    fmt.eprintln("bifrost:", message)
+    launcher_report("status", 1)
+    os.exit(1)
+}
 
 bridge :: proc(method: string, request: Request) -> (string, bool) {
     encoded, err := json.marshal(request, allocator = context.temp_allocator)
@@ -46,21 +61,25 @@ bridge :: proc(method: string, request: Request) -> (string, bool) {
 }
 
 parse_options :: proc(args: []string) -> Options {
-    options := Options{command = "toggle", filter = {-1, -1, ""}, backdrop=true}
+    options := Options{command = "toggle", filter = {-1, -1, ""}, backdrop=true, scale=DEFAULT_UI_SCALE}
     for i := 0; i < len(args); i += 1 {
         a := args[i]
         switch a {
-        case "toggle", "hide", "doctor", "list": options.command = a
+        case "toggle", "hide", "doctor", "list", "authorize": options.command = a
         case "--demo": options.demo = true
         case "--backdrop": options.backdrop = true
         case "--no-backdrop": options.backdrop = false
-        case "--workspace", "--monitor", "--app", "--frames", "--screenshot":
+        case "--workspace", "--monitor", "--app", "--frames", "--screenshot", "--scale":
             if i+1 >= len(args) { fail(fmt.tprintf("%s needs a value", a)) }
             i += 1
             value := args[i]
             switch a {
             case "--app": options.filter.app = value
             case "--screenshot": options.screenshot = value
+            case "--scale":
+                scale, ok := parse_ui_scale(value)
+                if !ok { fail("--scale must be a number from 0.5 to 3 (default 1.5)") }
+                options.scale = scale
             case "--frames":
                 n, ok := strconv.parse_int(value)
                 if !ok || n <= 0 { fail("--frames must be a positive integer") }
@@ -77,19 +96,23 @@ parse_options :: proc(args: []string) -> Options {
                 else { options.filter.monitor = n }
             }
         case "--help", "-h":
-            fmt.println(`Bifrost — Odin/raylib window picker for GNOME Wayland
-Usage: bifrost [toggle|hide|doctor|list] [options]
-  --workspace all|current|INDEX   Include windows on this workspace (zero-based)
+            fmt.println(`Bifrost — Odin/raylib window picker for GNOME Wayland and macOS
+Usage: bifrost [toggle|hide|doctor|list|authorize] [options]
+  authorize                      macOS: request Accessibility and open its settings
+  --workspace all|current|INDEX   Workspace filter (GNOME only; macOS supports all)
   --monitor all|current|INDEX     Include windows on this monitor (zero-based)
-  --app DESKTOP_ID                Include one application
-  --no-backdrop                   Disable desktop dimming and blur (enabled by default)
-  --backdrop                      Enable desktop dimming and blur
-  --demo                         UI preview without the GNOME extension
+  --app APP_ID                    Include one desktop ID / macOS bundle identifier
+  --no-backdrop                   Disable desktop backdrop (enabled by default)
+  --backdrop                      Dim desktop (GNOME also blurs)
+  --scale FACTOR                  UI pixel scale, 0.5–3 (default 1.5; DPI-aware)
+  --demo                         UI preview without window access permissions
   --frames N --screenshot FILE    Bounded demo rendering / PNG capture
 Keys: 1–9, 0, a–z select; arrows or Tab/Shift+Tab navigate; Enter selects; Esc goes back/cancels.
 PageUp/PageDown change overflow pages. Drag application tiles to save their order.
 Space opens installed-app search; type to filter, Up/Down or Tab/Shift+Tab to select, Enter/click to start.
-A second invocation closes the visible picker. Configuration: $XDG_STATE_HOME/bifrost/order.json`)
+A second invocation closes the visible picker.`)
+            fmt.println("Saved order:", state_path())
+            launcher_report("status", 0)
             os.exit(0)
         case: fail(fmt.tprintf("unknown argument: %s (see --help)", a))
         }
@@ -101,6 +124,9 @@ A second invocation closes the visible picker. Configuration: $XDG_STATE_HOME/bi
 }
 
 state_path :: proc() -> string {
+    when ODIN_OS == .Darwin {
+        return strings.clone(fmt.tprintf("%s/Library/Application Support/Bifrost/order.json", env("HOME")))
+    }
     root := env("XDG_STATE_HOME")
     if root == "" { root = fmt.tprintf("%s/.local/state", env("HOME")) }
     return strings.clone(fmt.tprintf("%s/bifrost/order.json", root))
@@ -141,6 +167,20 @@ preview_snapshot :: proc() -> Snapshot {
         {"8", "org.gnome.Music.desktop", "Music", "Now playing", "org.gnome.Music", 0, 0},
         {"9", "org.gnome.Calendar.desktop", "Calendar", "November", "org.gnome.Calendar", 0, 0},
         {"10", "org.gnome.Settings.desktop", "Settings", "Displays", "org.gnome.Settings", 0, 0},
+    }
+    when ODIN_OS == .Darwin {
+        windows = []Window{
+            {"1", "com.apple.Safari", "Safari", "Documentation", "", -1, 0},
+            {"2", "com.apple.Safari", "Safari", "Mail — Inbox", "", -1, 0},
+            {"3", "com.apple.Safari", "Safari", "Bifrost project", "", -1, 0},
+            {"4", "com.apple.TextEdit", "TextEdit", "PLAN.md — Bifrost", "", -1, 0},
+            {"5", "com.apple.Terminal", "Terminal", "odin build src", "", -1, 0},
+            {"6", "com.apple.Terminal", "Terminal", "Development shell", "", -1, 0},
+            {"7", "com.apple.finder", "Finder", "Projects", "", -1, 0},
+            {"8", "com.apple.Music", "Music", "Now playing", "", -1, 0},
+            {"9", "com.apple.iCal", "Calendar", "November", "", -1, 0},
+            {"10", "com.apple.systempreferences", "System Settings", "Displays", "", -1, 0},
+        }
     }
     heap_windows := make([]Window, len(windows))
     copy(heap_windows, windows)
@@ -207,6 +247,10 @@ load_font :: proc(snapshot: Snapshot, bold := false) -> rl.Font {
     paths := []string{env("BIFROST_FONT"), "/usr/share/fonts/google-noto-vf/NotoSans[wght].ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf", "/usr/share/fonts/TTF/DejaVuSans.ttf"}
     if bold {
         paths = []string{env("BIFROST_BOLD_FONT"), "/usr/share/fonts/open-sans/OpenSans-Bold.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans-Bold.ttf", "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf", "/usr/share/fonts/gnu-free/FreeSansBold.ttf"}
+    }
+    when ODIN_OS == .Darwin {
+        paths = []string{env("BIFROST_FONT"), "/System/Library/Fonts/Supplemental/Arial.ttf", "/System/Library/Fonts/Helvetica.ttc"}
+        if bold { paths = []string{env("BIFROST_BOLD_FONT"), "/System/Library/Fonts/Supplemental/Arial Bold.ttf", "/System/Library/Fonts/Helvetica.ttc"} }
     }
     for path in paths {
         if path != "" && os.exists(path) {
@@ -275,9 +319,9 @@ view_grid_layout :: proc(font: rl.Font, groups: []Group, snapshot: Snapshot,
 }
 
 size_picker :: proc(width, height: c.int, scale: f32) {
-    pixel_width, pixel_height := c.int(f32(width)*scale), c.int(f32(height)*scale)
-    bf_window_size_limits(pixel_width, pixel_height)
-    rl.SetWindowSize(pixel_width, pixel_height)
+    logical_width, logical_height := c.int(f32(width)*scale), c.int(f32(height)*scale)
+    bf_window_size_limits(logical_width, logical_height)
+    rl.SetWindowSize(logical_width, logical_height)
 }
 
 selection_held :: proc() -> bool {
@@ -286,29 +330,47 @@ selection_held :: proc() -> bool {
     return false
 }
 
+take_screenshot :: proc(filename: string) {
+    when ODIN_OS == .Darwin {
+        // The bundled raylib screenshot path applies Retina scaling twice.
+        // Read the native framebuffer dimensions once and let raylib encode it.
+        width, height: c.int
+        pixels := bf_screen_pixels(&width, &height)
+        if pixels == nil { fail("could not read picker framebuffer") }
+        defer rl.MemFree(pixels)
+        image := rl.Image{data=pixels, width=width, height=height, mipmaps=1, format=.UNCOMPRESSED_R8G8B8A8}
+        if !rl.ExportImage(image, cstr(filename)) { fail("could not save picker screenshot") }
+    } else { rl.TakeScreenshot(cstr(filename)) }
+}
+
 run_picker :: proc(options: Options, snapshot: Snapshot, order: ^Order, path: string) {
     groups := build_groups(order^, snapshot, options.filter)
     defer free_groups(&groups)
-    if bf_wayland_prepare() == 0 { fail(string(bf_error())) }
-    startup_mark("Wayland connection")
-    // Draw and hit-test in the same logical grid, then enlarge the entire UI.
-    // Reduce the scale only when even a single tile would exceed the work area.
-    ui_scale := min(f32(1.5), f32(snapshot.width-16)/f32(CELL_WIDTH+48),
-        f32(snapshot.height-16)/f32(GRID_Y+222+grid_footer_height(1, true)))
+    if bf_display_prepare() == 0 { fail(string(bf_error())) }
+    startup_mark("display connection")
+    // Start conservatively, then resolve backing scale from the native window
+    // before choosing fonts/layout or presenting its first complete frame.
+    ui_scale := picker_scale(options.scale, 1, snapshot.width, snapshot.height)
     available_width := int(f32(snapshot.width-16)/ui_scale)
     available_height := int(f32(snapshot.height-16)/ui_scale)
     grid := grid_layout(len(groups), 188, available_width, available_height)
     cols, capacity := grid.cols, grid.capacity
     width, height := c.int(grid.width), c.int(grid.height)
     rl.SetTraceLogLevel(.WARNING)
-    rl.SetConfigFlags({.WINDOW_UNDECORATED, .WINDOW_HIGHDPI, .WINDOW_RESIZABLE, .VSYNC_HINT})
+    window_flags := rl.ConfigFlags{.WINDOW_UNDECORATED, .WINDOW_HIGHDPI, .WINDOW_RESIZABLE, .VSYNC_HINT}
+    when ODIN_OS == .Darwin { window_flags += {.WINDOW_HIDDEN} }
+    rl.SetConfigFlags(window_flags)
     rl.InitWindow(c.int(f32(width)*ui_scale), c.int(f32(height)*ui_scale), cstr(fmt.tprintf("Bifrost · %s", snapshot.token)))
-    if !rl.IsWindowReady() { fail("raylib could not create its Wayland window") }
+    if !rl.IsWindowReady() { fail("raylib could not create the picker window") }
     defer rl.CloseWindow()
-    if bf_wayland_active() == 0 { fail("picker did not use native Wayland") }
+    if bf_display_active() == 0 { fail("picker did not use the required native display backend") }
     startup_mark("window and OpenGL")
     rl.SetExitKey(.KEY_NULL)
     rl.SetTargetFPS(60)
+    backing_scale := max(rl.GetWindowScaleDPI().x, rl.GetWindowScaleDPI().y)
+    ui_scale = picker_scale(options.scale, backing_scale, snapshot.width, snapshot.height)
+    available_width = int(f32(snapshot.width-16)/ui_scale)
+    available_height = int(f32(snapshot.height-16)/ui_scale)
     camera := rl.Camera2D{zoom = ui_scale}
     font := load_font(snapshot)
     defer if font.texture.id != rl.GetFontDefault().texture.id { rl.UnloadFont(font) }
@@ -342,7 +404,7 @@ run_picker :: proc(options: Options, snapshot: Snapshot, order: ^Order, path: st
     picker_mouse := launcher_mouse
     // Submit the complete picker before asking Shell to present it. A separate
     // blank frame here used to add a swap/frame wait to every invocation.
-    needs_present := !options.demo
+    needs_present := !options.demo || ODIN_OS == .Darwin
     child, page, highlighted := -1, 0, 0
     gesture := Pointer_Gesture{}
     armed, done, activated, had_focus := true, false, false, false
@@ -354,6 +416,23 @@ run_picker :: proc(options: Options, snapshot: Snapshot, order: ^Order, path: st
         focused := rl.IsWindowFocused()
         if focused { had_focus = true }
         if had_focus && !focused && !options.demo { break }
+        // A monitor/desktop scaling change can arrive after presentation. Keep
+        // layout, native bounds, and input in the same logical coordinate space.
+        next_backing_scale := max(rl.GetWindowScaleDPI().x, rl.GetWindowScaleDPI().y)
+        if next_backing_scale != backing_scale {
+            backing_scale = next_backing_scale
+            ui_scale = picker_scale(options.scale, backing_scale, snapshot.width, snapshot.height)
+            available_width = int(f32(snapshot.width-16)/ui_scale)
+            available_height = int(f32(snapshot.height-16)/ui_scale)
+            camera.zoom = ui_scale
+            if launcher_active {
+                width = c.int(min(max(int(width), min(700, available_width-16)), available_width-16))
+                height = c.int(min(760, available_height-12))
+            }
+            size_picker(width, height, ui_scale)
+            needs_present = !options.demo || ODIN_OS == .Darwin
+            gesture = {} // Resizing during a drag must not reorder a different tile.
+        }
         // One coordinate sample drives hover, clicks, drag targets, and drawing.
         mouse := ui_mouse_position(camera)
         entering_launcher := !launcher_active && !gesture.active && rl.IsKeyPressed(.SPACE)
@@ -376,7 +455,7 @@ run_picker :: proc(options: Options, snapshot: Snapshot, order: ^Order, path: st
                         catalogue_loaded = true
                         launcher.catalogue_error = ""
                     } else {
-                        launcher.catalogue_error = "Cannot list apps; update and reload the GNOME extension"
+                        launcher.catalogue_error = "Cannot list installed applications"
                         launcher.error = launcher.catalogue_error
                     }
                     delete(response)
@@ -392,14 +471,14 @@ run_picker :: proc(options: Options, snapshot: Snapshot, order: ^Order, path: st
             width = max(width, c.int(min(700, available_width-16)))
             height = c.int(min(760, available_height-12))
             size_picker(width, height, ui_scale)
-            needs_present = !options.demo
+            needs_present = !options.demo || ODIN_OS == .Darwin
         }
         if launcher_active {
             back, app_index := launcher_input(&launcher, width, height, entering_launcher, mouse, &launcher_mouse)
             if back {
                 launcher_active = false
                 picker_mouse = mouse
-                needs_present = !options.demo
+                needs_present = !options.demo || ODIN_OS == .Darwin
             } else if app_index >= 0 {
                 app := launcher.apps[app_index]
                 if options.demo { launcher.error = fmt.aprintf("Preview: would start %s", app.name) }
@@ -525,12 +604,16 @@ run_picker :: proc(options: Options, snapshot: Snapshot, order: ^Order, path: st
             if width != c.int(grid.width) || height != c.int(grid.height) {
                 width, height = c.int(grid.width), c.int(grid.height)
                 size_picker(width, height, ui_scale)
-                needs_present = !options.demo
+                needs_present = !options.demo || ODIN_OS == .Darwin
             }
         }
         rl.BeginDrawing()
         rl.ClearBackground({19, 23, 34, 255})
-        rl.BeginMode2D(camera)
+        drawing_camera := camera
+        // BeginMode2D replaces raylib's DPI matrix on both platforms. The
+        // drawing camera uses framebuffer pixels; the input camera stays logical.
+        drawing_camera.zoom *= f32(rl.GetRenderWidth())/f32(rl.GetScreenWidth())
+        rl.BeginMode2D(drawing_camera)
         rl.DrawRectangleRounded({0, 0, f32(width), f32(height)}, 0.06, 12, {19, 23, 34, 255})
         mode := "all windows"
         if options.filter.workspace != -1 { mode = "workspace" }
@@ -616,16 +699,25 @@ run_picker :: proc(options: Options, snapshot: Snapshot, order: ^Order, path: st
             footer := "Tab / Shift+Tab · Enter/click to choose · Space to search · Esc to cancel"
             if status != "" { footer = status }
             if gesture.dragging && child < 0 { footer = "Release to save position · Esc to cancel drag" }
-            if cols == 1 && status == "" && !gesture.dragging {
-                text(font, "Tab / Shift+Tab · Enter/click", 24, f32(height-56), 13, {139, 170, 192, 255}, f32(width-48))
-                text(font, "Space: search · Esc: cancel", 24, f32(height-35), 13, {139, 170, 192, 255}, f32(width-48))
-            } else {
-                text(font, footer, 24, f32(height-35), 13, {139, 170, 192, 255}, f32(width-48))
+            instructions := []string{footer}
+            if status == "" && !gesture.dragging {
+                if cols == 1 {
+                    instructions = []string{"Tab/Shift+Tab: move", "Enter/click: choose", "Space: search", "Esc: cancel"}
+                } else if cols == 2 {
+                    instructions = []string{"Tab/Shift+Tab · Enter/click", "Space: search · Esc: cancel"}
+                }
+            }
+            footer_y := height-FOOTER_TEXT_BOTTOM-c.int((len(instructions)-1)*FOOTER_LINE_HEIGHT)
+            for line, i in instructions {
+                text(font, line, 24, f32(footer_y)+f32(i*FOOTER_LINE_HEIGHT), FOOTER_FONT_SIZE, {139, 170, 192, 255}, f32(width-48))
             }
             if pages > 1 { text(font, fmt.tprintf("Page %d/%d · PgUp/PgDn", page+1, pages), 24,
-                f32(height-57-(22 if cols == 1 else 0)), 12, {139, 151, 173, 255}) }
+                f32(footer_y-FOOTER_DETAIL_HEIGHT), FOOTER_DETAIL_FONT_SIZE, {139, 151, 173, 255}, f32(width-48)) }
         } // Launcher replaces the icon grid and picker footer.
         rl.EndMode2D()
+        if options.frames > 0 && frame+1 == options.frames && options.screenshot != "" {
+            take_screenshot(options.screenshot)
+        }
         rl.EndDrawing()
         if frame == 0 { startup_mark("first frame") }
         if needs_present {
@@ -639,7 +731,10 @@ run_picker :: proc(options: Options, snapshot: Snapshot, order: ^Order, path: st
         }
         frame += 1
         if options.frames > 0 && frame >= options.frames {
-            if options.screenshot != "" { rl.TakeScreenshot(cstr(options.screenshot)) }
+            if startup_profile.enabled {
+                fmt.eprintf("bifrost rendering: window %dx%d; framebuffer %dx%d; DPI %.2f; UI zoom %.2f\n",
+                    rl.GetScreenWidth(), rl.GetScreenHeight(), rl.GetRenderWidth(), rl.GetRenderHeight(), backing_scale, ui_scale)
+            }
             done = true
         }
         free_all(context.temp_allocator)
@@ -651,9 +746,23 @@ run_picker :: proc(options: Options, snapshot: Snapshot, order: ^Order, path: st
 }
 
 main :: proc() {
+    launcher_report("pid", os.get_pid())
+    defer launcher_report("status", 0)
     started := time.tick_now()
     startup_profile = {enabled=env("BIFROST_TIMING") == "1", start=started, last=started}
     options := parse_options(os.args[1:])
+    if options.command == "authorize" {
+        when ODIN_OS == .Darwin {
+            if bf_request_access() != 0 { fmt.println("Bifrost Accessibility permission is enabled.") }
+            else { fmt.eprintln(string(bf_error())) }
+            return
+        } else { fail("authorize is a macOS command") }
+    }
+    when ODIN_OS == .Darwin {
+        if options.filter.workspace != -1 {
+            fail("macOS public APIs do not expose Space membership; use --workspace all")
+        }
+    }
     defer bf_shutdown()
     if options.command == "hide" && options.demo { return }
     if !options.demo && options.command != "doctor" && options.command != "list" {
@@ -666,13 +775,22 @@ main :: proc() {
     if options.demo { snapshot = preview_snapshot() }
     else {
         response, ok := bridge("Snapshot", {backdrop=options.backdrop && options.command == "toggle"})
-        if !ok { fail(fmt.tprintf("GNOME bridge unavailable. Install/enable bifrost@dlb.local.\n%s", response)) }
+        if !ok {
+            when ODIN_OS == .Darwin { fail(response) }
+            else { fail(fmt.tprintf("GNOME bridge unavailable. Install/enable bifrost@dlb.local.\n%s", response)) }
+        }
         if json.unmarshal_string(response, &snapshot) != nil || snapshot.version != 1 || snapshot.token == "" {
-            fail("unsupported or malformed GNOME bridge snapshot")
+            fail("unsupported or malformed window snapshot")
         }
         if options.command == "doctor" || options.command == "list" {
             if options.command == "list" { fmt.println(response) }
-            else { fmt.printf("GNOME bridge v%d connected; %d eligible windows; pointer monitor %d; native Wayland required.\n", snapshot.version, len(snapshot.windows), snapshot.monitor) }
+            else {
+                when ODIN_OS == .Darwin {
+                    fmt.printf("macOS Accessibility connected; %d eligible windows; pointer monitor %d; Space filtering unavailable.\n", len(snapshot.windows), snapshot.monitor)
+                } else {
+                    fmt.printf("GNOME bridge v%d connected; %d eligible windows; pointer monitor %d; native Wayland required.\n", snapshot.version, len(snapshot.windows), snapshot.monitor)
+                }
+            }
             dismissed, _ := bridge("Dismiss", {token = snapshot.token}); delete(dismissed)
             return
         }

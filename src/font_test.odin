@@ -19,6 +19,9 @@ ui_fonts_do_not_request_missing_unused_glyphs :: proc(t: ^testing.T) {
         "/usr/share/fonts/google-noto-vf/NotoSans[wght].ttf",
         "/usr/share/fonts/open-sans/OpenSans-Bold.ttf",
     }
+    when ODIN_OS == .Darwin {
+        paths = {"/System/Library/Fonts/Supplemental/Arial.ttf", "/System/Library/Fonts/Supplemental/Arial Bold.ttf"}
+    }
     for path, i in paths {
         if !os.exists(path) { continue }
         bytes, err := os.read_entire_file(path, context.allocator)

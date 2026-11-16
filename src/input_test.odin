@@ -47,7 +47,7 @@ hover_and_click_targets_stay_aligned_after_resize_and_dpi_scale_resets :: proc(t
     defer delete(state.results)
     append(&state.results, Search_Result{index=7}, Search_Result{index=2})
     camera.zoom = 1.5
-    rl.SetMouseOffset(75, 315) // UI (50, 210), inside search row 1.
+    rl.SetMouseOffset(75, c.int(f32(LAUNCHER_LIST_Y+LAUNCHER_ROW_HEIGHT+5)*camera.zoom))
     rl.SetMouseScale(1, 1)
     mouse = ui_mouse_position(camera)
     launcher_pointer_step(&state, mouse.x, mouse.y, 700, 760, true, true, false, true)

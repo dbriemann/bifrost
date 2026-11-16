@@ -1,9 +1,120 @@
 # Bifrost
 
-A keyboard-driven application/window picker for **GNOME 50 on Wayland**, written
-in **Odin**, drawn with **raylib**. A small GNOME Shell extension supplies window
-metadata, activation, and picker placement. Other compositors and macOS are
-planned; this version implements the GNOME path, including an installed-app launcher.
+A keyboard-driven application/window picker for **GNOME 50 on Wayland and macOS**,
+written in **Odin**, drawn with **raylib**. GNOME uses a small Shell extension;
+macOS uses native AppKit and Accessibility APIs. Both provide grouped windows,
+saved application order, and an installed-app launcher. Other compositors remain
+planned.
+
+## macOS build and use
+
+On Apple Silicon, install Apple's Command Line Tools if needed
+(`xcode-select --install`), then run:
+
+```sh
+# First checkout only: installs a self-contained Odin/raylib 6.2 toolchain in .tools/.
+./scripts/setup-macos.sh
+make
+make test
+make install
+~/.local/bin/bifrost doctor
+~/.local/bin/bifrost toggle
+```
+
+The build also works with `ODIN_BIN=/absolute/path/to/odin` and a matching raylib
+6.2 macOS archive. The project-local compiler takes precedence over PATH; it
+survives `make clean`. Builds prefer the standalone Command Line Tools compiler
+and SDK; set `DEVELOPER_DIR` to select a different Xcode installation. Node.js is
+needed for `make test`. No Homebrew GLFW, GLib, GTK, or GNOME extension is needed.
+The deployment target is macOS 12; verification is on this Apple Silicon Mac.
+Older macOS releases and Intel hardware have not been validated.
+
+Verification includes all 31 Odin tests, all 29 GNOME bridge tests, native macOS
+checks for window-session validation, permission diagnostics, application discovery,
+icons, atomic saves and toggle/hide IPC, plus bundle validation, temporary
+installation, ZIP packaging, and a live Retina demo capture. Real-window selection
+requires Accessibility permission and has not yet been exercised.
+
+`make` creates `build/Bifrost.app`. `make install` copies it to
+`~/Applications/Bifrost.app` and creates a command wrapper in `~/.local/bin`.
+`APP_DIR` and `BIN_DIR` override those destinations. You can also run
+`./build/Bifrost.app/Contents/MacOS/bifrost` directly or open the bundle in Finder.
+Use the installed command or open the app in Finder for its Accessibility identity.
+The installed command launches the bundle through macOS Launch Services so the
+Accessibility grant belongs to Bifrost. Direct execution from a terminal or
+automation host can be attributed to that host and report missing permission.
+Command output is relayed after the app exits. The wrapper waits for the app's
+own completion receipt and returns its exit status, avoiding Launch Services'
+process-wait race when a command exits quickly.
+The bundle is signed locally with an ad-hoc signature; `make package` creates
+`dist/Bifrost-macos-arm64.zip`. This is a local development build, not a signed
+and notarized public release. Ad-hoc signatures include the executable hash,
+so rebuilding can invalidate the previous Accessibility entry. Remove that entry
+with the minus button, re-add the installed app with the plus button, and enable
+it. Toggling the old entry may leave its stale signing requirement in place.
+Set `CODESIGN_IDENTITY` to a persistent code-signing identity in your keychain
+to sign successive builds with the same certificate. This Mac currently has no
+valid code-signing identity configured; ad-hoc signing is the default.
+
+Before real window access, add the app bundle in **System Settings → Privacy &
+Security → Accessibility** and enable it, then quit and reopen Bifrost.
+`bifrost authorize` requests the macOS permission prompt and opens this page.
+`doctor` explains missing permission; Bifrost never silently substitutes
+application activation for a failed individual-window selection. Demo rendering
+works without Accessibility permission:
+
+```sh
+./build/Bifrost.app/Contents/MacOS/bifrost --demo
+./build/Bifrost.app/Contents/MacOS/bifrost --demo --frames 30 --screenshot /tmp/bifrost-preview.png
+```
+
+For a global **Command+^** shortcut on a German keyboard, run `make install-hotkey`.
+This installs a small native helper that starts at login and registers the key
+directly with macOS, including while a terminal has focus. It opens the existing
+`Bifrost.app` through Launch Services and forwards a second press to the visible
+picker. The helper requires no Accessibility or Input Monitoring grant of its own.
+The binding uses physical key code 50 (the grave-accent key on a US keyboard).
+Clear any existing Mission Control assignment for this key before installation.
+
+A macOS Shortcut with a **Run Shell Script** action invoking the absolute path to
+`bifrost toggle` also works, but Shortcuts adds dispatch latency and its service
+key assignment may not work in every application. To migrate an existing shortcut,
+build with `make hotkey`, find its UUID using `shortcuts list --show-identifiers`,
+then run `./scripts/install-macos-hotkey.py --replace-shortcut UUID`. This removes
+only the Bifrost shortcut's key assignment and retains its actions.
+
+The login helper is `~/Library/LaunchAgents/org.bifrost.hotkey.plist`; its log is
+`~/Library/Logs/Bifrost/hotkey.log`. To stop it, run
+`launchctl bootout gui/$(id -u)/org.bifrost.hotkey`, then remove that launch-agent
+file and `~/Applications/Bifrost Hotkey.app` to prevent it starting again at login.
+A second invocation, or `bifrost hide`, also dismisses the existing picker.
+
+The macOS adapter lists standard windows and dialogs exposed by regular
+applications through Accessibility, including minimized windows. Apps with no
+eligible windows do not appear. Bundle identifiers drive grouping and ordering;
+`bifrost list` prints those identifiers and window metadata. Selection raises the
+exact retained Accessibility window and unminimizes it when necessary.
+Inaccessible applications are reported on stderr; closed targets and rejected
+actions produce selection errors. Search scans `/Applications`,
+`/System/Applications`, system application utilities, and `~/Applications`,
+then launches the chosen bundle through NSWorkspace. **Command+V** pastes in
+search; Control shortcuts also work.
+
+`--monitor current` and explicit zero-based monitor filters use window bounds.
+The picker opens on the pointer's monitor. Public macOS APIs do not reliably
+expose Space membership, so **workspace filters other than `all` are rejected**.
+Off-Space enumeration and activation depend on what each application's
+Accessibility implementation exposes. Fullscreen Spaces, Stage Manager, and
+multiple-display focus behavior still need interactive validation.
+
+The macOS backdrop dims the desktop across displays without capturing it;
+it does not provide the GNOME frozen-image blur. `--no-backdrop` disables dimming.
+Saved order lives in `~/Library/Application Support/Bifrost/order.json`, separate
+from Linux ordering. Native PNG/ICNS images and system Arial fonts are supported;
+the Linux SVG rasterizer is not used on macOS. Remove the installed app and
+command wrapper to uninstall; remove the order file separately to reset ordering.
+
+The remaining desktop-specific descriptions below refer to the GNOME backend.
 
 The picker uses a larger layout with 120-pixel icons, enlarged fonts and key
 badges, and centered application names/window titles below each icon. Names
@@ -17,6 +128,24 @@ including a shorter final overflow page, with a small footer below the last row.
 Window size constraints update with the content so switching views does not
 leave an oversized panel. Monitor limits can produce a wider/narrower grid or
 overflow pages; very small work areas reduce the overall scale to stay usable.
+
+UI sizes refer to rendered pixels on both platforms. The default pixel zoom is
+1.5; native window and mouse coordinates divide that zoom by the display's
+backing scale. On a 2× Retina display the native zoom is therefore 0.75, giving
+the same 45-pixel labels and 120-pixel icons as the Linux renderer, rather than
+doubling their size. The picker updates this conversion when display scaling
+changes, including fractional scales. Text, badges, icons, layout, and hit targets
+use the same conversion.
+
+Use `--scale` to tune the whole picker on any display, from 0.5 to 3:
+
+```sh
+bifrost toggle --scale 1.25
+```
+
+Larger values enlarge the picker; the default is `1.5`. Monitor fit can still
+reduce the zoom on very small work areas. Font families remain platform-specific;
+`BIFROST_FONT` and `BIFROST_BOLD_FONT` can choose the same fonts on both systems.
 
 By default, GNOME dims and blurs the desktop around the picker across all
 monitors, including the top bar, while leaving the picker sharp. Use
@@ -198,7 +327,7 @@ Demo selection displays the selected title instead of activating a real window.
 
 ## Verification and current limits
 
-Implemented checks: twenty-eight Odin search/model/font/image/interaction tests for drag gestures, drop
+Implemented checks: thirty-one Odin search/model/font/image/interaction tests for drag gestures, drop
 targets, cancellation, grouping, persistence round-trip,
 compaction, filters, ordering, and key alphabet; twenty-nine mocked-compositor tests of
 the actual extension class; native icon lookup/SVG-to-RGBA and atomic state-write
@@ -208,6 +337,9 @@ missing-icon rejection, PNG/SVG pixel
 checks, font glyph coverage, balanced/content-sized layouts and paged hit targets,
 Wayland position-call routing and content-size constraints; compilation and
 command-line validation.
+DPI checks cover rendered text/icon sizes and pointer targets at fractional and
+Retina scales, scaled layouts on small monitors, overflow pages, and UI-scale
+argument validation.
 Backdrop checks cover stable full-monitor surfaces, sharp picker ordering, resizing,
 default/disabled behavior, actor reuse, and cleanup after selection, cancellation,
 native window loss, lock, extension disable, session eviction, and setup errors.
@@ -241,7 +373,7 @@ should exercise:
 The executable currently runs only while the picker is open; there is no resident
 service or autostart setup. Each invocation reconnects and loads icons. GNOME 50
 is the only declared extension target. Unicode glyph coverage depends on the
-chosen font. No native macOS or other compositor backend is implemented yet.
+chosen font. Other compositor backends are not implemented.
 
 Startup submits the complete picker before requesting GNOME presentation, without
 an extra blank frame. The bridge presents an already mapped window immediately;

@@ -2,7 +2,12 @@ package main
 
 GRID_GAP :: CELL_WIDTH-TILE_WIDTH
 GRID_ROW_GAP :: 12
-GRID_FOOTER :: 48
+GRID_FOOTER :: 54
+FOOTER_FONT_SIZE :: 22
+FOOTER_DETAIL_FONT_SIZE :: 18
+FOOTER_LINE_HEIGHT :: 28
+FOOTER_DETAIL_HEIGHT :: 24
+FOOTER_TEXT_BOTTOM :: 42
 
 Grid_Layout :: struct {
     cols, rows, capacity, pages, page, visible: int,
@@ -10,7 +15,8 @@ Grid_Layout :: struct {
 }
 
 grid_footer_height :: proc(cols: int, paginated: bool) -> int {
-    return GRID_FOOTER + (22 if cols == 1 else 0) + (22 if paginated else 0)
+    extra_lines := 3 if cols == 1 else (1 if cols == 2 else 0)
+    return GRID_FOOTER + extra_lines*FOOTER_LINE_HEIGHT + (FOOTER_DETAIL_HEIGHT if paginated else 0)
 }
 
 grid_rows_that_fit :: proc(cols, count, tile_height, available_height: int) -> int {

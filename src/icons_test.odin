@@ -22,13 +22,15 @@ application_png_and_svg_images_keep_their_pixels :: proc(t: ^testing.T) {
     testing.expect_value(t, rl.GetImageColor(png, 0, 0), rl.Color{233,84,32,255})
     testing.expect_value(t, rl.GetImageColor(png, 1, 0), rl.Color{53,132,228,128})
 
-    svg := load_icon_image(fmt.tprintf("%s/tests/fixtures/app.svg", directory), "fixture.desktop")
-    testing.expect(t, svg.data != nil)
-    if svg.data == nil { return }
-    defer rl.UnloadImage(svg)
-    testing.expect_value(t, svg.width, 256)
-    testing.expect_value(t, svg.height, 256)
-    testing.expect_value(t, rl.GetImageColor(svg, 64, 64), rl.Color{233,84,32,255})
+    when ODIN_OS == .Linux {
+        svg := load_icon_image(fmt.tprintf("%s/tests/fixtures/app.svg", directory), "fixture.desktop")
+        testing.expect(t, svg.data != nil)
+        if svg.data == nil { return }
+        defer rl.UnloadImage(svg)
+        testing.expect_value(t, svg.width, 256)
+        testing.expect_value(t, svg.height, 256)
+        testing.expect_value(t, rl.GetImageColor(svg, 64, 64), rl.Color{233,84,32,255})
+    }
 
     missing := load_icon_image("bifrost-nonexistent-icon-regression", "bifrost-nonexistent.desktop")
     testing.expect(t, missing.data == nil)

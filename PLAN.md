@@ -2,7 +2,9 @@
 
 Status: Linux/GNOME first, Odin/raylib UI, and a JavaScript GNOME Shell bridge
 selected. A first GNOME prototype is implemented (2026-11-11); live desktop
-validation is still outstanding.
+validation is still outstanding. A native macOS adapter was added on 2026-11-16;
+its build, shared/native tests, bundle packaging, and Retina demo rendering have
+been validated on Apple Silicon. Real window selection needs Accessibility permission.
 
 ## First implementation status
 
@@ -42,8 +44,8 @@ The manual validation sequence is in `README.md`.
 Prototype scope differs from the longer-term architecture below: the executable
 runs only while visible; a second invocation closes it. It does not yet stay
 resident, publish live window deltas, or replace the visible picker on a request
-with different filters. Window membership is frozen until reopening. macOS and
-other compositor backends remain planned follow-up work.
+with different filters. Window membership is frozen until reopening. Other
+compositor backends remain planned follow-up work.
 
 ## Purpose
 
@@ -52,7 +54,7 @@ targets. Choose a number to focus a window. Keep positions predictable so that
 repeated use builds spatial and keyboard muscle memory.
 
 The application is written in Odin with a shared raylib UI. Target Linux Wayland
-first, with a planned macOS adapter. A separate Xorg backend is out of scope.
+first, with a native macOS adapter now implemented. A separate Xorg backend is out of scope.
 Platform independence is a design goal, subject to the window-management
 capabilities each platform exposes.
 
@@ -96,7 +98,7 @@ Background applications with no eligible window are not shown.
 | --- | --- | --- |
 | Initial desktop support | Linux/GNOME Wayland first; Fedora 44 / GNOME 50.6 is the initial test environment | Selected |
 | Small JavaScript GNOME bridge allowed? | Yes; add the bridge required for GNOME window access, with application logic and UI in Odin | Selected |
-| macOS support | Native adapter after the first Linux backend; user has a Mac available later for building/testing | Planned |
+| macOS support | Native AppKit/Accessibility adapter, app bundle, and Apple Silicon build | Implemented; interactive window validation pending |
 | Inactive/filtered applications | Hide and compact; persist relative application order | Selected |
 | Exact key alphabet | `1234567890abcdefghijklmnopqrstuvwxyz` (36 choices per level) | Proposed |
 | Beyond 36 choices at either level | Explicit overflow pages; no time-based multi-key ambiguity | Proposed |
@@ -264,7 +266,18 @@ stacking, and monitor placement reliably with this bridge. If it cannot, discuss
 the tradeoff before adopting a Shell-rendered picker: that would move some UI
 implementation into JavaScript and change the Odin boundary.
 
-### macOS adapter (planned)
+### macOS adapter
+
+Implemented in `native/platform_macos.m` using a thin Objective-C C-ABI adapter
+and the shared Odin/raylib UI. Builds now create an ad-hoc signed app bundle;
+the native backend covers Accessibility window snapshots and exact-window raise,
+AppKit icons and application launching, pointer-monitor placement, dimming,
+private command sockets, and atomic order persistence in Application Support.
+Workspace filters are rejected because public APIs do not expose Space membership.
+The compiler deployment target is macOS 12; the available machine is Apple Silicon.
+Shared tests and native checks run on macOS; live window selection requires
+enabling Accessibility, and fullscreen/Spaces/multiple displays remain to verify.
+The design constraints below still guide further validation and development.
 
 Reuse the Odin application model and raylib renderer. Implement a native adapter
 inside the application; no GNOME-style Shell extension or D-Bus service is
@@ -316,14 +329,12 @@ Important implementation constraints:
   speculatively. A native hotkey or externally configured shortcut can invoke
   the picker; ordinary in-picker input does not require a global key logger.
 
-Ship as a macOS application bundle with stable identity. Determine minimum OS,
-Apple Silicon/Intel support, signing, and notarization requirements before
-distribution. Linux development can prepare the interface, but validation needs
-a real macOS environment. The user has a Mac available later for building and
-testing. Prepare the shared interface and isolate platform dependencies during
-Linux development; defer macOS build and runtime claims until that validation.
-Choose the minimum macOS version and CPU architectures when the test machine is
-available. macOS support is planned, not implemented or tested.
+The local macOS build ships as an app bundle with a fixed bundle identifier and
+ad-hoc signature, with a macOS 12 deployment target. Build, tests, installation to
+temporary destinations, ZIP packaging, and Retina demo rendering are verified
+on Apple Silicon. Accessibility-authorized window selection, older OS releases,
+and Intel hardware remain to validate. Public distribution still needs a signing
+and notarization workflow.
 
 ### Backend boundary
 
