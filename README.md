@@ -94,6 +94,10 @@ applications through Accessibility, including minimized windows. Apps with no
 eligible windows do not appear. Bundle identifiers drive grouping and ordering;
 `bifrost list` prints those identifiers and window metadata. Selection raises the
 exact retained Accessibility window and unminimizes it when necessary.
+Window attributes are fetched together in one request per window, with a fallback
+for providers that cannot answer the batch. Each invocation still reads a fresh
+window snapshot. Application icons pass directly from AppKit as RGBA pixels,
+avoiding temporary PNG encoding, file writes and decoding during normal use.
 Inaccessible applications are reported on stderr; closed targets and rejected
 actions produce selection errors. Search scans `/Applications`,
 `/System/Applications`, system application utilities, and `~/Applications`,

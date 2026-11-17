@@ -23,6 +23,20 @@ static NSDictionary *decode(char *response) {
 int main(int argc, char **argv) {
     @autoreleasepool {
         if (argc == 2) { assert(bf_instance(argv[1]) == 0); bf_shutdown(); return 0; }
+        // Missing batch attributes are error values, not strings or geometry.
+        // Keep the other attributes usable when a provider omits one field.
+        AXError unsupported = kAXErrorAttributeUnsupported;
+        id missing = CFBridgingRelease(AXValueCreate(kAXValueAXErrorType, &unsupported));
+        CGPoint point = {23, 45};
+        id position = CFBridgingRelease(AXValueCreate(kAXValueCGPointType, &point));
+        NSArray *attributes = @[@"AXWindow", missing, position, NSNull.null, @"Example"];
+        assert([window_string(attributes, 0) isEqual:@"AXWindow"]);
+        assert([window_string(attributes, 1) isEqual:@""]);
+        assert(window_attribute(attributes, 2) == position);
+        assert(!window_attribute(attributes, 3) && !window_attribute(attributes, 8));
+        assert([window_string(attributes, 4) isEqual:@"Example"]);
+        assert([window_string(attributes, 2) isEqual:@""]);
+        puts("Batched window attributes preserve missing-field and geometry handling: OK");
         char directory[] = "/tmp/bifrost-macos-test-XXXXXX";
         assert(mkdtemp(directory));
         assert(!setenv("BIFROST_RUNTIME_DIR", directory, 1));

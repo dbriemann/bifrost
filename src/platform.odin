@@ -22,5 +22,6 @@ when ODIN_OS == .Darwin {
     foreign platform {
         bf_screen_pixels :: proc(width, height: ^c.int) -> rawptr ---
         bf_request_access :: proc() -> c.int ---
+        bf_app_pixels :: proc(description, app_id: cstring, width, height: ^c.int) -> rawptr ---
     }
 }

@@ -190,6 +190,21 @@ preview_snapshot :: proc() -> Snapshot {
 // Return a raylib-owned image in both cases so callers can always UnloadImage.
 // PNG/JPEG/etc use raylib's in-process decoders, not GdkPixbuf's external service.
 load_icon_image :: proc(description, app_id: string) -> rl.Image {
+    when ODIN_OS == .Darwin {
+        // Ordinary image files already have a direct raylib decoder. Preserve
+        // their exact pixels instead of round-tripping through CoreGraphics.
+        if description != "" && os.exists(description) && !strings.has_suffix(strings.to_lower(description, context.temp_allocator), ".app") {
+            return decode_icon_image(description)
+        }
+        // AppKit supplies RGBA directly; avoid encoding, writing and decoding
+        // temporary PNGs for every application on every invocation.
+        width, height: c.int
+        pixels := bf_app_pixels(cstr(description), cstr(app_id), &width, &height)
+        if pixels == nil { return {} }
+        defer bf_free(pixels)
+        borrowed := rl.Image{data=pixels, width=width, height=height, mipmaps=1, format=.UNCOMPRESSED_R8G8B8A8}
+        return rl.ImageCopy(borrowed)
+    }
     path := bf_app_icon(cstr(description), cstr(app_id))
     if path == nil { return {} }
     defer bf_free(rawptr(path))
@@ -496,7 +511,9 @@ run_picker :: proc(options: Options, snapshot: Snapshot, order: ^Order, path: st
                 for result in launcher.results {
                     app := launcher.apps[result.index]
                     if _, loaded := icons[app.id]; !loaded {
-                        icons[app.id] = load_icon("", app.id)
+                        description := ""
+                        when ODIN_OS == .Darwin { description = app.description }
+                        icons[app.id] = load_icon(description, app.id)
                     }
                 }
             }
