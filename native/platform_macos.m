@@ -67,6 +67,27 @@ static NSString *ax_string(AXUIElementRef element, CFStringRef attribute) {
     id value = ax_value(element, attribute);
     return [value isKindOfClass:NSString.class] ? value : @"";
 }
+static NSArray *window_attributes(AXUIElementRef element) {
+    NSArray *names = @[(__bridge NSString *)kAXRoleAttribute, (__bridge NSString *)kAXSubroleAttribute,
+        (__bridge NSString *)kAXPositionAttribute, (__bridge NSString *)kAXSizeAttribute,
+        (__bridge NSString *)kAXTitleAttribute];
+    CFArrayRef values = NULL;
+    AXError result = AXUIElementCopyMultipleAttributeValues(element, (__bridge CFArrayRef)names, 0, &values);
+    if (result != kAXErrorSuccess) { if (values) CFRelease(values); return nil; }
+    id array = CFBridgingRelease(values);
+    return [array isKindOfClass:NSArray.class] && [array count] == names.count ? array : nil;
+}
+static id window_attribute(NSArray *values, NSUInteger index) {
+    if (index >= values.count) return nil;
+    id value = values[index];
+    if (value == NSNull.null || (CFGetTypeID((__bridge CFTypeRef)value) == AXValueGetTypeID() &&
+        AXValueGetType((__bridge AXValueRef)value) == kAXValueAXErrorType)) return nil;
+    return value;
+}
+static NSString *window_string(NSArray *values, NSUInteger index) {
+    id value = window_attribute(values, index);
+    return [value isKindOfClass:NSString.class] ? value : @"";
+}
 static BOOL trusted(void) {
     if (AXIsProcessTrusted()) return YES;
     error_set([NSString stringWithFormat:@"Accessibility permission is required for this build. Run bifrost authorize to open System Settings > Privacy & Security > Accessibility. If Bifrost is already listed, remove it with the minus button, then add %@ with the plus button and enable it. Launch through the installed bifrost command or Finder.", NSBundle.mainBundle.bundlePath]);
@@ -184,13 +205,17 @@ static char *snapshot(void) {
             AXUIElementRef element = (AXUIElementRef)CFArrayGetValueAtIndex(list, i);
             if (CFGetTypeID(element) != AXUIElementGetTypeID()) continue;
             AXUIElementSetMessagingTimeout(element, 0.25);
-            NSString *role = ax_string(element, kAXRoleAttribute);
-            NSString *subrole = ax_string(element, kAXSubroleAttribute);
+            // One cross-process request instead of separate role, subrole,
+            // position, size and title requests. Older providers can fall back.
+            NSArray *attributes = window_attributes(element);
+            NSString *role = attributes ? window_string(attributes, 0) : ax_string(element, kAXRoleAttribute);
+            NSString *subrole = attributes ? window_string(attributes, 1) : ax_string(element, kAXSubroleAttribute);
             if (![role isEqualToString:(__bridge NSString *)kAXWindowRole]) continue;
             if (subrole.length && ![subrole isEqualToString:(__bridge NSString *)kAXStandardWindowSubrole] &&
                 ![subrole isEqualToString:(__bridge NSString *)kAXDialogSubrole]) continue;
             CGPoint position = {0}; CGSize size = {0};
-            id p = ax_value(element, kAXPositionAttribute), s = ax_value(element, kAXSizeAttribute);
+            id p = attributes ? window_attribute(attributes, 2) : ax_value(element, kAXPositionAttribute);
+            id s = attributes ? window_attribute(attributes, 3) : ax_value(element, kAXSizeAttribute);
             BOOL bounds = p && s && CFGetTypeID((__bridge CFTypeRef)p) == AXValueGetTypeID() &&
                 CFGetTypeID((__bridge CFTypeRef)s) == AXValueGetTypeID() &&
                 AXValueGetValue((__bridge AXValueRef)p, kAXValueCGPointType, &position) &&
@@ -202,7 +227,7 @@ static char *snapshot(void) {
             target.pid = running.processIdentifier;
             targets[wid] = target;
             NSString *name = running.localizedName ?: identity;
-            NSString *title = ax_string(element, kAXTitleAttribute);
+            NSString *title = attributes ? window_string(attributes, 4) : ax_string(element, kAXTitleAttribute);
             [windows addObject:@{@"id": wid, @"app": identity, @"name": name,
                 @"title": title.length ? title : name, @"icon": running.bundleURL.path ?: @"",
                 @"workspace": @(-1), @"monitor": @(bounds ? screen_for_rect((CGRect){position,size}) : -1)}];
@@ -397,6 +422,27 @@ void *bf_screen_pixels(int *width, int *height) {
     return rlReadScreenPixels(*width, *height);
 }
 
+static NSBitmapImageRep *icon_bitmap(NSImage *image) {
+    if (!image) return nil;
+    NSBitmapImageRep *bitmap = [[NSBitmapImageRep alloc] initWithBitmapDataPlanes:NULL pixelsWide:256 pixelsHigh:256
+        bitsPerSample:8 samplesPerPixel:4 hasAlpha:YES isPlanar:NO colorSpaceName:NSDeviceRGBColorSpace
+        bitmapFormat:0 bytesPerRow:256*4 bitsPerPixel:32];
+    NSGraphicsContext *context = bitmap ? [NSGraphicsContext graphicsContextWithBitmapImageRep:bitmap] : nil;
+    if (!context) return nil;
+    [NSGraphicsContext saveGraphicsState];
+    [NSGraphicsContext setCurrentContext:context];
+    [image drawInRect:NSMakeRect(0,0,256,256) fromRect:NSZeroRect operation:NSCompositingOperationCopy fraction:1];
+    [NSGraphicsContext restoreGraphicsState];
+    return bitmap;
+}
+static void unpremultiply(unsigned char *pixels, size_t count) {
+    for (size_t i = 0; i < count; i++) {
+        unsigned char *p = pixels + i*4;
+        if (!p[3]) { p[0] = p[1] = p[2] = 0; }
+        else if (p[3] != 255) for (int c = 0; c < 3; c++)
+            p[c] = (unsigned char)fmin(255, (p[c]*255 + p[3]/2)/p[3]);
+    }
+}
 char *bf_icon(const char *description) {
     @autoreleasepool {
         if (!description || !*description) return NULL;
@@ -410,13 +456,8 @@ char *bf_icon(const char *description) {
             if (!mkdtemp(directory)) { error_set(@"Cannot create icon cache"); return NULL; }
             icon_directory = [NSString stringWithUTF8String:directory];
         }
-        NSImage *image = [NSWorkspace.sharedWorkspace iconForFile:path];
-        NSBitmapImageRep *bitmap = [[NSBitmapImageRep alloc] initWithBitmapDataPlanes:NULL pixelsWide:256 pixelsHigh:256
-            bitsPerSample:8 samplesPerPixel:4 hasAlpha:YES isPlanar:NO colorSpaceName:NSDeviceRGBColorSpace bytesPerRow:0 bitsPerPixel:0];
-        [NSGraphicsContext saveGraphicsState];
-        [NSGraphicsContext setCurrentContext:[NSGraphicsContext graphicsContextWithBitmapImageRep:bitmap]];
-        [image drawInRect:NSMakeRect(0,0,256,256) fromRect:NSZeroRect operation:NSCompositingOperationCopy fraction:1];
-        [NSGraphicsContext restoreGraphicsState];
+        NSBitmapImageRep *bitmap = icon_bitmap([NSWorkspace.sharedWorkspace iconForFile:path]);
+        if (!bitmap) { error_set(@"Cannot rasterize application icon"); return NULL; }
         NSString *output = [icon_directory stringByAppendingPathComponent:[NSUUID.UUID.UUIDString stringByAppendingString:@".png"]];
         if (![[bitmap representationUsingType:NSBitmapImageFileTypePNG properties:@{}] writeToFile:output atomically:YES]) {
             error_set(@"Cannot rasterize application icon"); return NULL;
@@ -448,10 +489,30 @@ void *bf_pixels(const char *path, int *width, int *height) {
         CGContextDrawImage(context, CGRectMake(0,0,w,h), source);
         CGContextRelease(context);
         // raylib consumes straight-alpha RGBA, whereas CoreGraphics premultiplies.
-        for (size_t i = 0; i < w*h; i++) {
-            unsigned char *p = pixels + i*4;
-            if (p[3] && p[3] != 255) for (int c = 0; c < 3; c++) p[c] = (unsigned char)fmin(255, (p[c]*255 + p[3]/2)/p[3]);
+        unpremultiply(pixels, w*h);
+        *width = (int)w; *height = (int)h;
+        return pixels;
+    }
+}
+void *bf_app_pixels(const char *description, const char *app_id, int *width, int *height) {
+    @autoreleasepool {
+        error_set(@"");
+        NSString *path = description && *description ? [NSString stringWithUTF8String:description] : nil;
+        if (!path || ![NSFileManager.defaultManager fileExistsAtPath:path]) {
+            NSURL *url = app_id && *app_id ? [NSWorkspace.sharedWorkspace URLForApplicationWithBundleIdentifier:
+                [NSString stringWithUTF8String:app_id]] : nil;
+            path = url.path;
         }
+        if (!path) { error_set(@"Cannot find application icon"); return NULL; }
+        if (![path.pathExtension.lowercaseString isEqualToString:@"app"])
+            return bf_pixels(path.fileSystemRepresentation, width, height);
+        NSBitmapImageRep *bitmap = icon_bitmap([NSWorkspace.sharedWorkspace iconForFile:path]);
+        if (!bitmap || !bitmap.bitmapData) { error_set(@"Cannot rasterize application icon"); return NULL; }
+        size_t w = bitmap.pixelsWide, h = bitmap.pixelsHigh;
+        unsigned char *pixels = malloc(w*h*4);
+        if (!pixels) { error_set(@"Cannot allocate icon pixels"); return NULL; }
+        for (size_t y = 0; y < h; y++) memcpy(pixels+y*w*4, bitmap.bitmapData+y*bitmap.bytesPerRow, w*4);
+        unpremultiply(pixels, w*h);
         *width = (int)w; *height = (int)h;
         return pixels;
     }

@@ -31,6 +31,37 @@ application_png_and_svg_images_keep_their_pixels :: proc(t: ^testing.T) {
         testing.expect_value(t, svg.height, 256)
         testing.expect_value(t, rl.GetImageColor(svg, 64, 64), rl.Color{233,84,32,255})
     }
+    when ODIN_OS == .Darwin {
+        // Compare every pixel with the previous PNG route, covering orientation,
+        // channel order and alpha conversion for a full-size AppKit icon.
+        bundle := fmt.tprintf("%s/build/Bifrost.app", directory)
+        filename := bf_icon(cstr(bundle))
+        testing.expect(t, filename != nil)
+        if filename == nil { return }
+        defer bf_free(rawptr(filename))
+        previous := decode_icon_image(string(filename))
+        direct := load_icon_image(bundle, "org.bifrost.picker")
+        testing.expect(t, previous.data != nil && direct.data != nil)
+        defer if previous.data != nil { rl.UnloadImage(previous) }
+        defer if direct.data != nil { rl.UnloadImage(direct) }
+        if previous.data != nil && direct.data != nil {
+            testing.expect_value(t, direct.width, previous.width)
+            testing.expect_value(t, direct.height, previous.height)
+            expected := rl.LoadImageColors(previous)
+            actual := rl.LoadImageColors(direct)
+            defer rl.UnloadImageColors(expected)
+            defer rl.UnloadImageColors(actual)
+            for i in 0..<int(direct.width*direct.height) {
+                a, b := actual[i], expected[i]
+                matches := a.a == b.a && (a.a == 0 ||
+                    abs(int(a.r)-int(b.r)) <= 1 && abs(int(a.g)-int(b.g)) <= 1 && abs(int(a.b)-int(b.b)) <= 1)
+                if !matches {
+                    testing.expect(t, false, fmt.tprintf("Icon pixel %d differs: direct %v; PNG %v", i, a, b))
+                    break
+                }
+            }
+        }
+    }
 
     missing := load_icon_image("bifrost-nonexistent-icon-regression", "bifrost-nonexistent.desktop")
     testing.expect(t, missing.data == nil)
